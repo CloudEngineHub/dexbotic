@@ -370,7 +370,7 @@ class ActionNormAnd2String:
         min = min.reshape(1, -1)
         max = max.reshape(1, -1)
         action = np.clip(action, min, max)
-        action = (action - min) / ((max - min) * 2 + 1e-8) - 1
+        action = (action - min) / (max - min + 1e-8) * 2 - 1
         return action
 
     def _action2bin(self, action, vocab_size) -> np.array:
