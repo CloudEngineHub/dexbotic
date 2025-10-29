@@ -135,7 +135,7 @@ class RoboTwin2CogActActionConfig(_CogACTActionConfig):
         action_config = Pipeline([
             ToDict(),
             ToNumpy(),
-            AddAction(predict_length=16),
+            AddAction(predict_length=1),
             PadState(ndim=16, axis=-1),
             PadAction(ndim=16, axis=-1),
             DeltaAction(enable=self.delta),
