@@ -336,7 +336,7 @@ class Pi0InferenceConfig(Config):
         logger.info(f"Normalization stats: {self.norm_stats}")
 
         self._load_model()
-        self.prev_prompt = None
+        self.prev_text = None
         self.timestep = 0
         self.episode = 0
 
@@ -449,7 +449,7 @@ class Pi0InferenceConfig(Config):
         batch_images_tensor = torch.stack(batch_images_tensor, dim=0)
         batch_image_masks = torch.stack(batch_image_masks, dim=0)
 
-        self._save_image(images[0], text[0])
+        self._save_image(batch_images[0], text[0])
 
         prompt = text
         batch_input_ids = np.array(
@@ -511,7 +511,7 @@ class Pi0InferenceConfig(Config):
         outputs["action"] = actions.detach().cpu().numpy()
         outputs = self.output_transform(outputs)
         logger.info(f"Processing time: {time.monotonic() - t0}")
-        return outputs["action"][..., : self.action_dim].tolist()
+        return outputs["action"][0, ..., : self.action_dim].tolist()
 
     def _save_image(self, images: list[Image.Image], text: str) -> None:
         if not self.save_image:
