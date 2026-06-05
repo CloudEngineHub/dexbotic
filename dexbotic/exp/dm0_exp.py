@@ -233,7 +233,7 @@ class DM0TrainerConfig(TrainerConfig):
             enabled=True,
             cpu_ram_efficient_loading=False,
             transformer_layer_cls_to_wrap=("Qwen3MLP",),
-            cast_model_to_bf16_backends=("fsdp",),
+            cast_model_to_bf16_backends=("fsdp", "fsdp2"),
         )
     )
     model_max_length: int = field(default=200)

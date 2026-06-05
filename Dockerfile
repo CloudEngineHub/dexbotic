@@ -33,8 +33,8 @@ COPY pyproject.toml /app/pyproject.toml
 
 RUN /opt/conda/bin/conda create -n dexbotic python=3.10 -y && \
     /bin/bash -c "source activate dexbotic && \
-        pip install torch==2.2.2 torchvision==0.17.2 xformers --index-url https://download.pytorch.org/whl/cu118 && \
-        pip install -e . && pip install transformers==4.51.0"
+        pip install torch==2.6.2 torchvision==0.21.0 xformers --index-url https://download.pytorch.org/whl/cu118 && \
+        pip install -e . && pip install transformers==4.57.6"
 
 RUN /bin/bash -c "source activate dexbotic && \
         pip install ninja && \

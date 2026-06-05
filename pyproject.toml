@@ -23,6 +23,7 @@ dependencies = [
     # Core ML/AI dependencies
     "transformers>=4.57.6",
     "accelerate>=1.10.0",
+    "deepspeed==0.19.1",
     "peft",
     "bitsandbytes",
     "einops",
@@ -51,7 +52,7 @@ dependencies = [
     "flask",
     "httpx",
     "requests",
-    "pydantic",
+    "pydantic==2.10.6",
 
     # UI and visualization
     "gradio",

@@ -13,7 +13,10 @@ torch>=2.6.0
 torchvision>=0.21.0
 transformers>=4.57.6
 accelerate>=1.10.0
+pydantic==2.10.6
 ```
+
+After pulling the repo, `pip install -e .` installs these pins. The default `Dockerfile` also pre-installs `torch==2.6.2` and `transformers==4.57.6` in the `dexbotic` conda environment.
 
 `transformers<5.0.0` uses the explicit Accelerate FSDP2 plugin path. `transformers>=5.0.0` is supported and will use the native Trainer FSDP2 path when available.
 
@@ -45,6 +48,7 @@ torchrun --nproc_per_node=8 playground/benchmarks/libero/libero_pi0.py \
 The same backend flag is available for:
 
 ```bash
+playground/benchmarks/libero/libero_pi0.py
 playground/benchmarks/libero/libero_pi05.py
 playground/benchmarks/libero/libero_dm0.py
 playground/benchmarks/libero/libero_cogact.py
@@ -145,7 +149,7 @@ fsdp_profile: FSDPProfile = field(
 
 This is mainly useful when FSDP1 flattening hits mixed-dtype parameters inside the same wrap unit. Do not add this by default for new models. Existing examples:
 
-- `dm0`: casts only for `("fsdp",)`.
+- `dm0`: casts for `("fsdp", "fsdp2")`.
 - `cogact`: casts for `("fsdp", "fsdp2")`.
 
 ### Troubleshooting Checklist

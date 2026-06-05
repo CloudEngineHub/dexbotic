@@ -38,6 +38,8 @@ conda activate dexbotic
 pip install -e .
 ```
 
+The image built from this repo's `Dockerfile` ships with `torch==2.6.2` and `transformers==4.57.6`.
+
 <details>
 <summary>Using on Blackwell GPUs</summary>
 
@@ -85,10 +87,10 @@ git clone https://github.com/Dexmal/dexbotic.git
 conda create -n dexbotic python=3.10 -y
 conda activate dexbotic
 
-pip install torch==2.2.2 torchvision==0.17.2 xformers --index-url https://download.pytorch.org/whl/cu118
+pip install torch==2.6.0 torchvision==0.21.0 xformers --index-url https://download.pytorch.org/whl/cu118
 cd dexbotic
 pip install -e .
-pip install transformers=4.51.0
+pip install transformers==4.57.6
 
 # Install FlashAttention
 pip install ninja packaging
@@ -175,6 +177,7 @@ torchrun --nproc_per_node=8 playground/benchmarks/libero/libero_cogact.py
 > We recommend using 8 × NVIDIA A100/H100 GPUs for training.
 > If you are using 8 × RTX 4090, please use the configuration file
 > `scripts/deepspeed/zero3_offload.json` to reduce GPU memory utilization.
+> For FSDP2 support, see [FSDP2.md](FSDP2.md).
 
 ### Training a Model with Your Own Data
 
