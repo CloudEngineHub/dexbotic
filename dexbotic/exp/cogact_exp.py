@@ -163,6 +163,15 @@ class InferenceConfig(BaseInferenceConfig):
         self.model_config = model.config
         logger.info(f"Model loaded successfully")
 
+    def _build_policy(self):
+        from dexbotic.policy.cogact_policy import CogACTPolicy
+        return CogACTPolicy(
+            model=self.model,
+            tokenizer=self.tokenizer,
+            norm_stats=self.norm_stats,
+            camera_order=self.camera_order,
+        )
+
     def _get_response(self, text: str, images: list[str]) -> str:
         t0 = time.monotonic()
         if len(images) == 1:

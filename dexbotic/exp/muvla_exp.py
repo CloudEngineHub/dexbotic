@@ -164,6 +164,7 @@ class InferenceConfig(InferenceConfig):
     norm_stats: Optional[dict] = field(default=None)
 
     def process_frame(self) -> None:
+        self._apply_inference_seed(request.form.get('seed'))
         results = self._get_response(
             text=request.form.get('text', ''),
             images=request.files.getlist('image', None),

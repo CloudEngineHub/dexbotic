@@ -29,7 +29,11 @@ from dexbotic.exp.base_exp import (
     ModelConfig,
     OptimizerConfig,
     TrainerConfig,
+    InferenceConfig as BaseInferenceConfig,
 )
+from dexbotic.data.dataset.dex_dataset import DexDataset
+from dexbotic.data.dataset.rgb_preprocess import DummyRGBProcessor
+from dexbotic.data.dataset.tokenization import DummyTokenization
 from dexbotic.model.pi0.pi0_arch import Pi0ForCausalLM, Pi0Model
 from dexbotic.data.dataset.transform.action import (
     ActionNorm,
@@ -48,12 +52,10 @@ from dexbotic.data.dataset.transform.common import (
 )
 from dexbotic.data.dataset.transform.multimodal import LoadMultiModal
 from dexbotic.data.dataset.transform.output import AbsoluteAction, ActionDenorm
-from dexbotic.data.dataset.dex_dataset import DexDataset
 from .base_exp import OPENAI_CLIP_PATH
-from dexbotic.data.dataset.rgb_preprocess import DummyRGBProcessor
-from dexbotic.data.dataset.tokenization import DummyTokenization
 from dexbotic.tokenization.process import Pi0Tokenization
 import dexbotic.data.utils.normalize as normalize
+from dexbotic.policy.pi0_policy import Pi0Policy
 
 
 def parse_args():
@@ -318,23 +320,13 @@ class Pi0TokenizerConfig(TokenizerConfig):
 
 
 @dataclass
-class Pi0InferenceConfig(Config):
-    model_name_or_path: Optional[str] = field(default=None)
-    port: int = field(default=7891)
-    save_image: bool = field(default=False)
-    save_image_dir: str = field(default="./debug_data")
-    norm_stats: Optional[dict] = field(default=None)
+class Pi0InferenceConfig(BaseInferenceConfig):
     num_images: int = field(default=3)
     non_delta_mask: list[int] = field(default_factory=lambda: [6])
     action_dim: int = field(default=7)
-
-    def run(self) -> None:
-        self._initialize_inference()
-        self.app = Flask(__name__)
-        self.app.add_url_rule(
-            "/process_frame", "process_frame", self.process_frame, methods=["POST"]
-        )
-        self.app.run(host="0.0.0.0", port=self.port, debug=False, threaded=False)
+    # len(camera_order) must equal num_images.
+    # None = always zero-padded; caller must not provide image/2 for this checkpoint.
+    camera_order: list = field(default_factory=lambda: ["agentview", "wrist", None])
 
     def _initialize_inference(self) -> None:
         if self.norm_stats is None:
@@ -346,6 +338,22 @@ class Pi0InferenceConfig(Config):
         self.prev_text = None
         self.timestep = 0
         self.episode = 0
+        self.policy = self._build_policy()
+
+    def _build_policy(self):
+        return Pi0Policy(
+            model=self.model,
+            tokenizer=self.tokenizer,
+            norm_stats=self.norm_stats,
+            input_pipeline=self.input_transform,
+            output_pipeline=self.output_transform,
+            tokenization_func=self.tokenization_func,
+            device=self.device,
+            num_images=self.num_images,
+            non_delta_mask=self.non_delta_mask,
+            action_dim=self.action_dim,
+            camera_order=self.camera_order,
+        )
 
     def _load_model(self) -> None:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -393,6 +401,7 @@ class Pi0InferenceConfig(Config):
         return ToNumpy()(norm_stats)
 
     def process_frame(self) -> None:
+        self._apply_inference_seed(request.form.get("seed"))
         results = self._get_response(
             text=request.form.get("text", ""),
             images=request.files.getlist("image", None),
@@ -468,7 +477,7 @@ class Pi0InferenceConfig(Config):
 
         if states is not None:
             if isinstance(states, str):
-                batch_states = np.array(json.loads(states))
+                batch_states = np.array(json.loads(states), dtype=np.float32)
                 if batch_states.ndim == 1:
                     batch_states = batch_states[None]
                 assert batch_states.shape[0] == batch_size, (
@@ -483,7 +492,7 @@ class Pi0InferenceConfig(Config):
                     f"but got {type(states)} with length {len(states)}."
                 )
                 batch_states = [json.loads(s) for s in states]
-                batch_states = np.array(batch_states)
+                batch_states = np.array(batch_states, dtype=np.float32)
         else:
             batch_states = np.zeros(
                 (

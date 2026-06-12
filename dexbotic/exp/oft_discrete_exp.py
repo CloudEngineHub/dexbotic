@@ -142,6 +142,7 @@ class OFTDiscreteModelConfig(ModelConfig):
 @dataclass
 class InferenceConfig(BaseInferenceConfig):
     def process_frame(self) -> None:
+        self._apply_inference_seed(request.form.get("seed"))
         results = self._get_response(
             text=request.form.get("text"),
             images=request.files.getlist("image"),
@@ -165,6 +166,14 @@ class InferenceConfig(BaseInferenceConfig):
         self.tokenizer = tokenizer
         self.model_config = model.config
         logger.info("Model loaded successfully")
+
+    def _build_policy(self):
+        from dexbotic.policy.oft_policy import OFTDiscretePolicy
+        return OFTDiscretePolicy(
+            model=self.model,
+            tokenizer=self.tokenizer,
+            norm_stats=self.norm_stats,
+        )
 
     def _get_response(
         self, text: str, images: list[str], states: Optional[str] = None

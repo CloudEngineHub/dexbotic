@@ -52,8 +52,9 @@ from dexbotic.exp.base_exp import (
     OptimizerConfig,
     TokenizerConfig,
     TrainerConfig,
+    InferenceConfig as BaseInferenceConfig,
 )
-from dexbotic.model.dm0.dm0_arch import DM0ForCausalLM
+from dexbotic.model.dm0.dm0_arch import DM0Config, DM0ForCausalLM
 from dexbotic.tokenization.process import DM0Tokenization
 
 
@@ -322,20 +323,106 @@ class DM0DataConfig(DataConfig):
 
 
 @dataclass
-class DM0InferenceConfig(Config):
-    model_name_or_path: Optional[str] = field(default=None)
-    port: int = field(default=7891)
-    save_image: bool = field(default=False)
-    save_image_dir: str = field(default="./debug_data")
-    norm_stats: Optional[dict] = field(default=None)
+class DM0InferenceConfig(BaseInferenceConfig):
     num_images: int = field(default=3)
+    camera_order: list = field(
+        default_factory=lambda: ["agentview", "wrist", None]
+    )
     non_delta_mask: list[int] = field(default_factory=lambda: [6])
     action_dim: int = field(default=7)
+    use_realtime_backend: bool = field(default=False)
+    realtime_weight_path: Optional[str] = field(default="")
+    realtime_max_lang_len: int = field(default=100)
+    realtime_diffusion_steps: int = field(default=10)
+    realtime_auto_convert: bool = field(default=False)
+
+    @property
+    def num_inference_steps(self) -> int:
+        return self.realtime_diffusion_steps if self.use_realtime_backend else 10
+
+    def _validate_realtime_config(self) -> None:
+        active_camera_count = len([name for name in self.camera_order if name is not None])
+        if active_camera_count > self.num_images:
+            raise ValueError(
+                "DM0 realtime backend requires num_images to be no smaller than active camera_order "
+                f"entries, got num_images={self.num_images}, camera_order={self.camera_order}. "
+                "Set num_images and camera_order consistently."
+            )
 
     def _load_model(self) -> None:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         logger.info(f"Loading model from {self.model_name_or_path}")
         logger.info(f"Using device: {self.device}")
+        if self.use_realtime_backend:
+            from dexbotic.model.dm0.realtime.dm0_triton_infer import DM0Inference
+
+            self._validate_realtime_config()
+            logger.info(
+                f"DM0 realtime config: num_images={self.num_images}, "
+                f"camera_order={self.camera_order}, max_lang_len={self.realtime_max_lang_len}, "
+                f"diffusion_steps={self.realtime_diffusion_steps}"
+            )
+            weight_path = self.realtime_weight_path or os.path.join(
+                self.model_name_or_path, "dm0_triton_weights.pt"
+            )
+            if not os.path.exists(weight_path):
+                if not self.realtime_auto_convert:
+                    raise FileNotFoundError(
+                        f"DM0 realtime weights not found: {weight_path}. "
+                        "Run `python -m dexbotic.model.dm0.realtime.convert_dm0_triton_weight "
+                        "--model_path <checkpoint> --output <checkpoint>/dm0_triton_weights.pt "
+                        f"--diffusion_steps {self.realtime_diffusion_steps}` first."
+                    )
+                from dexbotic.model.dm0.realtime.convert_dm0_triton_weight import (
+                    convert_checkpoint,
+                )
+
+                logger.info(f"Converting DM0 realtime weights to {weight_path}")
+                os.makedirs(os.path.dirname(weight_path), exist_ok=True)
+                convert_checkpoint(
+                    self.model_name_or_path,
+                    weight_path,
+                    device=str(self.device),
+                    diffusion_steps=self.realtime_diffusion_steps,
+                )
+                torch.cuda.empty_cache()
+            tokenizer = AutoTokenizer.from_pretrained(
+                self.model_name_or_path, use_fast=False, trust_remote_code=True
+            )
+            checkpoint = torch.load(weight_path, map_location=self.device, weights_only=True)
+            self.model = DM0Inference(
+                checkpoint=checkpoint,
+                num_images=self.num_images,
+                max_lang_len=self.realtime_max_lang_len,
+                diffusion_steps=self.realtime_diffusion_steps,
+                device=str(self.device),
+            )
+            self.tokenizer = tokenizer
+            self.model_config = DM0Config.from_pretrained(self.model_name_or_path)
+            self.tokenization_func = DM0Tokenization(self.tokenizer)
+            logger.info(f"DM0 realtime backend loaded from {weight_path}")
+
+            model_action_dim = getattr(self.model_config, "action_dim", 32)
+            self.input_transform = Pipeline(
+                [
+                    PadState(ndim=model_action_dim, axis=-1),
+                    ActionNorm(
+                        statistic_mapping=self.norm_stats, strict=False, use_quantiles=True
+                    ),
+                    ToTensor(),
+                ]
+            )
+            self.output_transform = Pipeline(
+                [
+                    ToNumpy(),
+                    ActionDenorm(
+                        statistic_mapping=self.norm_stats, strict=False, use_quantiles=True
+                    ),
+                    AbsoluteAction(),
+                ]
+            )
+            return
+
         model = DM0ForCausalLM.from_pretrained(
             self.model_name_or_path,
             torch_dtype=torch.float32,
@@ -372,14 +459,6 @@ class DM0InferenceConfig(Config):
             ]
         )
 
-    def run(self) -> None:
-        self._initialize_inference()
-        self.app = Flask(__name__)
-        self.app.add_url_rule(
-            "/process_frame", "process_frame", self.process_frame, methods=["POST"]
-        )
-        self.app.run(host="0.0.0.0", port=self.port, debug=False, threaded=False)
-
     def _initialize_inference(self) -> None:
         if self.norm_stats is None:
             norm_stats_file = os.path.join(self.model_name_or_path, "norm_stats.json")
@@ -390,6 +469,41 @@ class DM0InferenceConfig(Config):
         self.prev_text = None
         self.timestep = 0
         self.episode = 0
+        self.policy = self._build_policy()
+
+    def _build_policy(self):
+        if self.use_realtime_backend:
+            from dexbotic.policy.dm0_realtime_policy import DM0RealtimePolicy
+
+            return DM0RealtimePolicy(
+                realtime_model=self.model,
+                tokenizer=self.tokenizer,
+                norm_stats=self.norm_stats,
+                input_pipeline=self.input_transform,
+                output_pipeline=self.output_transform,
+                tokenization_func=self.tokenization_func,
+                device=self.device,
+                num_images=self.num_images,
+                non_delta_mask=self.non_delta_mask,
+                action_dim=self.action_dim,
+                model_action_dim=getattr(self.model_config, "action_dim", 32),
+                camera_order=self.camera_order,
+                max_lang_len=self.realtime_max_lang_len,
+            )
+        from dexbotic.policy.dm0_policy import DM0Policy
+        return DM0Policy(
+            model=self.model,
+            tokenizer=self.tokenizer,
+            norm_stats=self.norm_stats,
+            input_pipeline=self.input_transform,
+            output_pipeline=self.output_transform,
+            tokenization_func=self.tokenization_func,
+            device=self.device,
+            num_images=self.num_images,
+            non_delta_mask=self.non_delta_mask,
+            action_dim=self.action_dim,
+            camera_order=self.camera_order,
+        )
 
     def read_normalization_stats(self, action_norm_file: str | None) -> dict:
         logger.info(f"Reading normalization stats from {action_norm_file}")
@@ -402,6 +516,7 @@ class DM0InferenceConfig(Config):
         return ToNumpy()(norm_stats)
 
     def process_frame(self) -> None:
+        self._apply_inference_seed(request.form.get("seed"))
         results = self._get_response(
             text=request.form.get("text", ""),
             images=request.files.getlist("image", None),

@@ -1,15 +1,20 @@
+import base64
 import hashlib
 import json
 import os
 import pathlib
+import random
 import sys
 import time
-from dataclasses import dataclass, field
+import uuid
+from dataclasses import dataclass, field, fields
 from datetime import datetime
-from typing import Callable, Dict, Optional, Union
 from flask import Flask, jsonify, request
 import torch
 from PIL import Image
+from io import BytesIO
+from typing import Callable, Dict, List, Optional, Union
+
 import megfile
 import numpy as np
 import tqdm
@@ -55,6 +60,7 @@ from dexbotic.tokenization.process import LLMTokenization
 from dexbotic.tokenization import conversation as conversation_lib
 from dexbotic.tokenization.conversation import KeywordsStoppingCriteria
 from dexbotic.tokenization.tokenization import tokenizer_image_token
+from dexbotic.policy.types import GenSamplingConfig, SamplingConfig
 
 
 
@@ -655,8 +661,23 @@ class InferenceConfig(Config):
     save_image: bool = field(default=False)
     save_image_dir: str = field(default='./debug_data')
     norm_stats: Optional[dict] = field(default=None)
+    camera_order: list = field(default_factory=lambda: ["front"])
+
+    def _apply_inference_seed(self, seed) -> None:
+        if seed is None or seed == "":
+            return
+        seed = int(seed)
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
 
     def process_frame(self) -> None:
+        self._apply_inference_seed(request.form.get('seed'))
+        text = request.form.get("text", "")
+        images = request.files.getlist("image")
+        response_images = images if images else None
         results = self._get_response(
             text=request.form.get('text'),
             images=request.files.getlist('image'),
@@ -666,11 +687,15 @@ class InferenceConfig(Config):
     def run(self) -> None:
         self._initialize_inference()
         self.app = Flask(__name__)
-        self.app.add_url_rule(
-            '/process_frame',
-            'process_frame',
-            self.process_frame,
-            methods=['POST'])
+        # legacy route — kept for backward compatibility
+        self.app.add_url_rule('/process_frame', 'process_frame', self.process_frame, methods=['POST'])
+        # v1 routes
+        self.app.add_url_rule('/health', 'health', self._v1_health, methods=['GET'])
+        self.app.add_url_rule('/v1/models', 'v1_models', self._v1_models, methods=['GET'])
+        self.app.add_url_rule('/v1/capabilities', 'v1_capabilities', self._v1_capabilities, methods=['GET'])
+        self.app.add_url_rule('/v1/infer', 'v1_infer', self._v1_infer, methods=['POST'])
+        self.app.add_url_rule('/v1/reset', 'v1_reset', self._v1_reset, methods=['POST'])
+        self.app.add_url_rule('/v1/chat/completions', 'v1_chat', self._v1_chat, methods=['POST'])
         self.app.run(host='0.0.0.0', port=self.port, debug=False, threaded=False)
 
     def _load_model(self) -> None:
@@ -755,6 +780,10 @@ class InferenceConfig(Config):
             with open(os.path.join(save_image_dir_episode, 'text.txt'), 'w') as f:
                 f.write(text)
 
+    def _build_policy(self):
+        """Return a BasePolicy for this model, or None to stay in legacy mode."""
+        return None
+
     def _initialize_inference(self) -> None:
         self._load_model()
         self.prev_prompt = None
@@ -768,6 +797,8 @@ class InferenceConfig(Config):
             self.norm_stats = self.read_normalization_stats(self.norm_stats)
         logger.info(f"Normalization stats: {self.norm_stats}")
 
+        self.policy = self._build_policy()
+
     def read_normalization_stats(self, action_norm_file):
         logger.info(f"Reading normalization stats from {action_norm_file}")
         if action_norm_file is None or not megfile.smart_exists(action_norm_file):
@@ -778,6 +809,214 @@ class InferenceConfig(Config):
                 norm_stats = norm_stats['norm_stats']
             norm_stats = norm_stats['default']
         return norm_stats
+
+    # ── v1 route handlers ────────────────────────────────────────────────────
+
+    def _v1_health(self):
+        return jsonify({"status": "ok"})
+
+    def _v1_models(self):
+        model_id = os.path.basename(self.model_name_or_path or "unknown")
+        return jsonify({
+            "object": "list",
+            "data": [{"id": model_id, "object": "model"}],
+        })
+
+    def _v1_capabilities(self):
+        # camera_order has len == num_images; None entries are always zero-padded.
+        # Public API slots are 1-based; policy observations remain 0-based image/{i}.
+        # Only non-None slots require an image key from the caller.
+        policy_caps = (
+            self.policy.get_capabilities()
+            if getattr(self, "policy", None) is not None
+            else {}
+        )
+        state_caps = policy_caps.get("state", {})
+        slots = [
+            {"slot": i + 1, "name": name, "required": name is not None}
+            for i, name in enumerate(self.camera_order)
+        ]
+        return jsonify({
+            "model_family": self.__class__.__name__,
+            "vla": policy_caps.get("vla", getattr(self, "policy", None) is not None),
+            "vlm": policy_caps.get("vlm", False),
+            "modalities": {
+                "images": {
+                    "slots": slots,
+                    "format": "image/{slot_index}",
+                },
+                "state": {
+                    "used": state_caps.get("used", False),
+                    "required": state_caps.get("required", False),
+                    "dim": state_caps.get("dim", None),
+                },
+                "prompt": {"required": True},
+            },
+            "action_spec": {
+                "action_dim": getattr(self, "action_dim", None),
+                "chunk_size": getattr(self, "action_horizon", None),
+                "action_mode": policy_caps.get("action_mode", "unknown"),
+            },
+            "max_batch_size": policy_caps.get("max_batch_size", 1),
+            "sampling_defaults": {
+                "num_steps": getattr(self, "num_inference_steps", 10),
+                "cfg_scale": getattr(self, "cfg_scale", 1.0),
+            },
+        })
+
+    def _v1_infer(self):
+        if getattr(self, "policy", None) is None:
+            return jsonify({"error": "no policy configured"}), 501
+        try:
+            body = request.get_json(force=True)
+            if not isinstance(body, dict):
+                raise ValueError("request body must be a JSON object")
+            obs_raw = body.get("observation", {})
+            obs = self._decode_observation(obs_raw)
+        except (TypeError, ValueError) as exc:
+            return jsonify({"error": str(exc)}), 400
+        if self._state_required() and "state" not in obs_raw:
+            return jsonify({"error": "observation must contain state"}), 400
+        if not any(k.startswith("image/") for k in obs):
+            return jsonify({"error": "observation must contain at least one image"}), 400
+        sampling_raw = body.get("sampling") or {}
+        if sampling_raw and not isinstance(sampling_raw, dict):
+            return jsonify({"error": "sampling must be a JSON object"}), 400
+        supported_sampling_keys = {f.name for f in fields(SamplingConfig)}
+        sampling = {
+            k: v for k, v in sampling_raw.items()
+            if k in supported_sampling_keys
+        }
+        sc = SamplingConfig(**sampling) if sampling_raw else None
+        if sc is not None:
+            setattr(sc, "_provided_fields", set(sampling.keys()))
+        if sc is not None:
+            self._apply_inference_seed(sc.seed)
+        t0 = time.monotonic()
+        out = self.policy.select_action(obs, sc)[0]
+        latency_ms = round((time.monotonic() - t0) * 1000, 1)
+        return jsonify({
+            "actions": out.actions.tolist(),
+            "metadata": {"latency_ms": latency_ms},
+        })
+
+    def _v1_reset(self):
+        if getattr(self, "policy", None) is not None:
+            self.policy.reset()
+        return jsonify({"status": "ok"})
+
+    def _v1_chat(self):
+        if getattr(self, "policy", None) is None or not self.policy.supports_vlm():
+            return jsonify({"error": "model does not support VLM generation"}), 501
+        body = request.get_json(force=True)
+        obs = self._decode_chat_messages(body.get("messages", []))
+        sc = GenSamplingConfig(
+            max_new_tokens=body.get("max_tokens", 128),
+            temperature=body.get("temperature", 1.0),
+            top_p=body.get("top_p", 0.95),
+            do_sample=body.get("temperature", 1.0) != 0,
+        )
+        out = self.policy.generate(obs, sc)
+        return jsonify({
+            "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
+            "object": "chat.completion",
+            "model": body.get("model", "unknown"),
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": out.text},
+                "finish_reason": out.finish_reason,
+            }],
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": len(out.tokens),
+                "total_tokens": len(out.tokens),
+            },
+        })
+
+    def _decode_observation(self, obs_raw: dict) -> dict:
+        """Convert v1/infer HTTP payload → policy observation dict (single sample, non-list values).
+
+        Public image keys are 1-based to match dexdata images_1/images_2/...
+        Policy observation keys are still internal 0-based image/0, image/1, ...
+          new format: {"images": {"1": b64, "2": b64}}
+          legacy compat: top-level image_1, image_2, ... keys
+        """
+        obs = {}
+
+        if not isinstance(obs_raw, dict):
+            raise ValueError("observation must be a JSON object")
+
+        if "images" in obs_raw and isinstance(obs_raw["images"], dict):
+            # new format: numeric string keys "1", "2", ...
+            for slot_str, b64 in sorted(obs_raw["images"].items(), key=lambda x: self._parse_image_slot(x[0])):
+                external_slot = self._parse_image_slot(slot_str)
+                internal_slot = external_slot - 1
+                obs[f"image/{internal_slot}"] = self._decode_b64_image(b64, f"images.{slot_str}")
+        else:
+            # legacy compat: image_1, image_2, ... → image/0, image/1, ...
+            import re
+            old_keys = sorted(
+                (k for k in obs_raw if re.fullmatch(r"image_\d+", k)),
+                key=lambda k: int(k.split("_")[1]),
+            )
+            for key in old_keys:
+                external_slot = self._parse_image_slot(key.split("_")[1])
+                internal_slot = external_slot - 1
+                obs[f"image/{internal_slot}"] = self._decode_b64_image(obs_raw[key], key)
+
+        state = obs_raw.get("state")
+        if state is not None:
+            obs["state"] = np.array(state, dtype=np.float32)
+        obs["prompt"] = obs_raw.get("prompt", "")
+        return obs
+
+    def _state_required(self) -> bool:
+        if getattr(self, "policy", None) is None:
+            return False
+        return bool(
+            self.policy.get_capabilities()
+            .get("state", {})
+            .get("required", False)
+        )
+
+    def _parse_image_slot(self, slot) -> int:
+        try:
+            slot = int(slot)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"image slot must be a numeric string, got {slot!r}") from exc
+        if slot < 1:
+            raise ValueError(f"image slot must be 1-based and positive, got {slot}")
+        return slot
+
+    def _decode_b64_image(self, value, field: str) -> Image.Image:
+        if not isinstance(value, str):
+            raise ValueError(f"{field} must be a base64 string")
+        try:
+            raw = base64.b64decode(value, validate=True)
+            return Image.open(BytesIO(raw)).convert("RGB")
+        except Exception as exc:
+            raise ValueError(f"{field} is not a valid base64 image") from exc
+
+    def _decode_chat_messages(self, messages: list) -> dict:
+        """Convert OpenAI chat messages → policy observation dict."""
+        images, text = [], ""
+        for msg in messages:
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                text = content
+            else:
+                for part in content:
+                    if part.get("type") == "text":
+                        text = part["text"]
+                    elif part.get("type") == "image_url":
+                        url = part["image_url"]["url"]
+                        if url.startswith("data:"):
+                            b64 = url.split(",", 1)[1]
+                            img = Image.open(BytesIO(base64.b64decode(b64))).convert("RGB")
+                            images.append(img)
+        return {"prompt": text, "images": images}
 
 
 @dataclass

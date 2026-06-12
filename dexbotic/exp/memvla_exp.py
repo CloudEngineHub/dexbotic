@@ -307,6 +307,7 @@ class InferenceConfig(_InferenceConfig):
     norm_stats: Optional[dict] = field(default=None)
 
     def process_frame(self) -> None:
+        self._apply_inference_seed(request.form.get('seed'))
         results = self._get_response(
             text=request.form.get('text'),
             images=request.files.getlist('image'),
@@ -394,6 +395,15 @@ class InferenceConfig(_InferenceConfig):
         elif isinstance(self.norm_stats, str):
             self.norm_stats = self.read_normalization_stats(self.norm_stats)
         logger.info(f"Normalization stats: {self.norm_stats}")
+        self.policy = self._build_policy()
+
+    def _build_policy(self):
+        from dexbotic.policy.memvla_policy import MemVLAPolicy
+        return MemVLAPolicy(
+            model=self.model,
+            tokenizer=self.tokenizer,
+            norm_stats=self.norm_stats,
+        )
 
 
 @dataclass

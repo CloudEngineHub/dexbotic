@@ -47,6 +47,7 @@ from dexbotic.exp.pi0_exp import (
     Pi0TrainerConfig,
 )
 from dexbotic.model.pi05.hybrid_pi05_arch import HybridPi05ForCausalLM
+from dexbotic.policy.pi0_policy import Pi05Policy
 from dexbotic.tokenization.process import Pi05Tokenization
 
 
@@ -260,6 +261,21 @@ class Pi05DataConfig(Pi0DataConfig):
 
 @dataclass
 class Pi05InferenceConfig(Pi0InferenceConfig):
+    def _build_policy(self):
+        return Pi05Policy(
+            model=self.model,
+            tokenizer=self.tokenizer,
+            norm_stats=self.norm_stats,
+            input_pipeline=self.input_transform,
+            output_pipeline=self.output_transform,
+            tokenization_func=self.tokenization_func,
+            device=self.device,
+            num_images=self.num_images,
+            non_delta_mask=self.non_delta_mask,
+            action_dim=self.action_dim,
+            camera_order=self.camera_order,
+        )
+
     def _load_model(self) -> None:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         logger.info(f"Loading model from {self.model_name_or_path}")

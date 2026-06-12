@@ -167,7 +167,7 @@ class DM0TokenizerConfig(_DM0TokenizerConfig):
 @dataclass
 class DM0InferenceConfig(_DM0InferenceConfig):
     model_name_or_path: Optional[str] = field(
-        default="./user_checkpoints/dexbotic/DM0-libero"
+        default="./checkpoints/libero/libero_dm0"
     )
     port: int = field(default=7891)
     save_image: bool = field(default=False)
@@ -176,6 +176,7 @@ class DM0InferenceConfig(_DM0InferenceConfig):
     num_images: int = field(default=3)
     non_delta_mask: list[int] = field(default_factory=lambda: [6])
     action_dim: int = field(default=7)
+    camera_order: list = field(default_factory=lambda: ["agentview", "wrist", None])
 
     def _load_model(self) -> None:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

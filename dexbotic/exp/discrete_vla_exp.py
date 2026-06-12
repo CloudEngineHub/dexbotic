@@ -99,6 +99,15 @@ class DiscreteVLAInferenceConfig(InferenceConfig):
         self.model_config = model.config
         logger.info(f"Model loaded successfully")
 
+    def _build_policy(self):
+        from dexbotic.policy.discrete_vla_policy import DiscreteVLAPolicy
+        return DiscreteVLAPolicy(
+            model=self.model,
+            tokenizer=self.tokenizer,
+            norm_stats=self.norm_stats,
+            vocab_size=self.vocab_size,
+        )
+
     def _get_response(self, text: str, images: list[str]) -> str:
         t0 = time.monotonic()
         if len(images) == 1:
@@ -141,7 +150,9 @@ class DiscreteVLAExp(BaseExp):
         default_factory=DiscreteVLAOptimizerConfig)
     trainer_config: DiscreteVLATrainerConfig = field(default_factory=DiscreteVLATrainerConfig)
     data_config: DiscreteVLADataConfig = field(default_factory=DiscreteVLADataConfig)
-    inference_config: InferenceConfig = field(default_factory=InferenceConfig)
+    inference_config: DiscreteVLAInferenceConfig = field(
+        default_factory=DiscreteVLAInferenceConfig
+    )
 
     def inference(self) -> None:
         self.inference_config.run()

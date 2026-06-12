@@ -280,6 +280,7 @@ class NaVILAInferenceConfig(InferenceConfig):
             return default
 
     def process_frame(self) -> None:
+        self._apply_inference_seed(request.form.get("seed"))
         text = request.form.get("text", "")
         episode_first_frame = request.form.get("episode_first_frame")
         run_model = self._parse_bool(request.form.get("run_model"), default=True)

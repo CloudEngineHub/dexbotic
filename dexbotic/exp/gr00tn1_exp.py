@@ -173,6 +173,14 @@ class InferenceConfig(BaseInferenceConfig):
         self.model_config = model.config
         logger.info("Model loaded successfully")
 
+    def _build_policy(self):
+        from dexbotic.policy.gr00tn1_policy import Gr00tN1Policy
+        return Gr00tN1Policy(
+            model=self.model,
+            tokenizer=self.tokenizer,
+            norm_stats=self.norm_stats,
+        )
+
     def _get_response(self, text: str, images: list[str]) -> str:
         t0 = time.monotonic()
         if len(images) == 1:

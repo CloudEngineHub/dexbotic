@@ -139,6 +139,7 @@ class OFTModelConfig(ModelConfig):
 class InferenceConfig(BaseInferenceConfig):
 
     def process_frame(self) -> None:
+        self._apply_inference_seed(request.form.get('seed'))
         results = self._get_response(
             text=request.form.get('text'),
             images=request.files.getlist('image'),
@@ -160,6 +161,15 @@ class InferenceConfig(BaseInferenceConfig):
         self.tokenizer = tokenizer
         self.model_config = model.config
         logger.info(f"Model loaded successfully")
+
+    def _build_policy(self):
+        from dexbotic.policy.oft_policy import OFTPolicy
+        return OFTPolicy(
+            model=self.model,
+            tokenizer=self.tokenizer,
+            norm_stats=self.norm_stats,
+            camera_order=self.camera_order,
+        )
 
     def _get_response(self, text: str, images: list[str], states: Optional[str] = None) -> str:
         t0 = time.monotonic()
@@ -189,12 +199,10 @@ class InferenceConfig(BaseInferenceConfig):
             'cfg_scale': 1.5,
             'num_ddim_steps': 10,
             'action_norms': self.norm_stats}
-        
         if states is not None:
             states = json.loads(states)
             states = torch.tensor(states, dtype=self.model.dtype, device=self.model.device).reshape(1, -1)
             inference_args['states'] = states
-            
         outputs = self.model.inference_action(input_ids, image_tensor, inference_args)
         logger.info(f'prompt: <start>{prompt}<end>\naction: {outputs}')
         logger.info(f"Processing time: {time.monotonic() - t0}")
