@@ -29,7 +29,8 @@
 
 ## 🔥 News
 
-- **[2026-06-12]** Added a unified [v1 inference API](docs/InferenceAPI.md) for policy-based VLA/VLM serving and DM0 realtime inference with a 5x speedup.
+- **[2026-06-18]** Added a [DM0 realtime inference guide](docs/DM0RealtimeInference.md) for the Triton-backed realtime backend, including 5x core inference speedup results.
+- **[2026-06-12]** Added a unified [v1 inference API](docs/InferenceAPI.md) for consistent VLA/VLM serving across model wrappers.
 - **[2026-05-15]** Supported [FSDP2 training backend](docs/FSDP2.md) for faster distributed training.
 - **[2026-05-09]** Supported [Uni-NaVid](playground/example_uninavid_exp.py) with a [guide](docs/Uni-NaVid.md).
 - **[2026-04-27]** Supported [RLinf as an RL backend](docs/RLinfAsRLBackend.md) for RL post-training.

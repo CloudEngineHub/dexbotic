@@ -1,16 +1,16 @@
 # Dexbotic Inference API
 
-Dexbotic inference servers expose the original `/process_frame` route and a
-new v1 protocol for policy-based VLA/VLM inference.
-
-The v1 protocol standardizes:
+Dexbotic inference servers keep the legacy `/process_frame` route and add a
+v1 API for policy-based VLA/VLM serving. The v1 API gives clients one stable
+contract for:
 
 - action inference through `/v1/infer`
 - episode reset through `/v1/reset`
 - model capability discovery through `/v1/capabilities`
 - optional chat-style generation through `/v1/chat/completions`
 
-The legacy route remains supported for existing clients.
+This lets benchmark and deployment clients switch model wrappers without
+rewiring HTTP routes or request schemas.
 
 ## Start an inference server
 
@@ -37,43 +37,12 @@ The server listens on `0.0.0.0:<port>` and registers both legacy and v1 routes.
 
 ## DM0 realtime inference
 
-DM0 also has an optional realtime inference backend for latency-sensitive
-serving. The realtime path keeps the same `/v1/infer` API and policy contract,
-but replaces the core DM0 action-generation call with a Triton-backed optimized
-runtime. The legacy DM0 Python path remains available and is still the default
-unless the realtime entry/config is selected.
-
-Typical realtime launch:
-
-```bash
-python playground/benchmarks/libero/libero_dm0_realtime.py --task inference
-```
-
-The realtime backend is intended to preserve DM0's v1 inference semantics:
-same request schema, same action denormalization path, and the same absolute
-action contract exposed by `/v1/capabilities`. It should be evaluated with the
-same checkpoint, camera setup, normalization stats, and benchmark configuration
-as the non-realtime path.
-
-Measured on libero DM0 checkpoint, v1 API, and `libero_goal` probe benchmark:
-
-| Backend | Core inference mean | Core inference median |
-| --- | ---: | ---: |
-| DM0 realtime | 100.689 ms | 100.549 ms |
-| DM0 non-realtime | 554.053 ms | 550.889 ms |
-
-This corresponds to:
-
-- `5.50x` mean speedup for the core model call.
-- `5.48x` median speedup for the core model call.
-
-The core inference timing wraps only the server-side model call
-(`realtime_model.forward(...)` vs. `model.inference_action(**inputs)`) with CUDA
-synchronization. It excludes HTTP transport, request decoding, image
-preprocessing, tokenization, input/output transforms, action denormalization,
-and environment stepping.
-
-Reference project: [realtime-vla](https://github.com/dexmal/realtime-vla).
+DM0's optional realtime backend keeps the same v1 API while replacing the core
+action-generation call with a Triton-backed optimized runtime. Updated on
+2026-06-18, the realtime path shows about `5x` core inference speedup on the
+libero DM0 probe benchmark. See [DM0 realtime inference](DM0RealtimeInference.md)
+for launch instructions, benchmark numbers, timing scope, and backend-specific
+constraints.
 
 ## Routes
 
@@ -186,8 +155,6 @@ Notes:
   policies decide how to consume or validate its value.
 - `sampling` is optional. Supported fields are `num_steps`, `cfg_scale`, and
   `seed`; any other fields are ignored before dispatching to the policy.
-- DM0 realtime captures a fixed-step CUDA graph at service startup. For that
-  backend, request `sampling.num_steps` must match `/v1/capabilities`.
 - The response always uses `actions`; legacy `/process_frame` uses `response`.
 
 ### `POST /v1/reset`
