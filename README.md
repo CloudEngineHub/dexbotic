@@ -29,6 +29,7 @@
 
 ## 🔥 News
 
+- **[2026-06-18]** Released a [DOS-W1 inference tutorial](hardware/docs/dosw1_inference_example.md), covering how to integrate DOS-W1 with Dexbotic.
 - **[2026-06-18]** Added a [DM0 realtime inference guide](docs/DM0RealtimeInference.md) for the Triton-backed realtime backend, including 5x core inference speedup results.
 - **[2026-06-12]** Added a unified [v1 inference API](docs/InferenceAPI.md) for consistent VLA/VLM serving across model wrappers.
 - **[2026-05-15]** Supported [FSDP2 training backend](docs/FSDP2.md) for faster distributed training.
