@@ -8,9 +8,13 @@ from transformers import AutoConfig, AutoModel
 
 from .dm0_arch import DM0Config, DM0ForCausalLM
 from .dm0_prog_arch import DM0ProgConfig, DM0ProgForCausalLM
+from .hybrid_dm0_arch import HybridDM0Config, HybridDM0ForCausalLM
 
 AutoConfig.register("dexbotic_dm0", DM0Config)
 AutoModel.register(DM0Config, DM0ForCausalLM)
 
 AutoConfig.register("dexbotic_dm0_prog", DM0ProgConfig)
 AutoModel.register(DM0ProgConfig, DM0ProgForCausalLM)
+
+AutoConfig.register("dexbotic_hybrid_dm0", HybridDM0Config)
+AutoModel.register(HybridDM0Config, HybridDM0ForCausalLM)

@@ -198,3 +198,65 @@ After training, please refer to the [Evaluation](#evaluation) section above to e
 | PirlNav        | 70.4      | 34.1       | -         | -          |
 | Uni-NaVid      | 73.7    | 37.1       | -         | -          |
 | DM0        | 73.5  | 25.7   | 45.3  | 12.9   |
+
+## Hybrid DM0 Co-Training
+
+DM0 also supports hybrid co-training, where VLA action learning is mixed with general vision-language modeling data. This mode is useful when you want to continue training the DM0 action expert while retaining VLM-style dialogue supervision. It should be treated as an experimental training recipe: the best VLA/VLM sampling ratio depends on the target benchmark, and adding VLM data may trade off some action performance if the mixture is not tuned carefully.
+
+The implementation is provided by [`dexbotic/exp/hybrid_dm0_exp.py`](../dexbotic/exp/hybrid_dm0_exp.py) and [`dexbotic/model/dm0/hybrid_dm0_arch.py`](../dexbotic/model/dm0/hybrid_dm0_arch.py). HybridDM0 keeps the DM0 action pipeline, Qwen3-based merged attention, 3-view image input, 32D padded state/action format, and Flow Matching action generation. The data pipeline extends each batch with modality flags such as `has_action` and `has_text`, so VLA samples contribute action loss and VLM-only samples contribute text loss.
+
+The VLM dataset should be LLaVA-compatible multimodal dialogue data for DM0 VLM co-training. Each sample should provide image references and a `conversations` field with human/assistant turns, following the multimodal dialogue format described in [Data.md](Data.md). The VLM dataset must be registered under `dexbotic/data/data_source` in the same way as other Dexbotic datasets.
+
+For example, Cambrian-style data can be registered as a VLM dataset after converting or pointing its annotations to Dexbotic's JSONL layout. The registered dataset name can then be used as `your_vlm_dataset` in the co-training mixture, such as `your_vla_dataset+cambrian_737k_full`. The important part is the data format rather than the dataset name: VLM samples should contain image paths and LLaVA-compatible dialogue turns, and they should not be used for action normalization.
+
+When mixing VLA and VLM data, action normalization statistics must be computed only from action datasets. VLM-only dialogue data does not contain meaningful states or action trajectories, so it must not be included in norm-stat computation. Use `norm_dataset_name` to point to the action-only subset.
+
+For example, create a HybridDM0 experiment configuration like this:
+
+```python
+from dataclasses import dataclass, field
+from typing import Optional
+
+from dexbotic.exp.hybrid_dm0_exp import (
+    HybridDM0DataConfig,
+    HybridDM0Exp,
+    HybridDM0ModelConfig,
+)
+
+
+@dataclass
+class MyHybridDM0DataConfig(HybridDM0DataConfig):
+    # VLA/action dataset + LLaVA-compatible VLM dialogue dataset.
+    dataset_name: str = field(default="your_vla_dataset+your_vlm_dataset")
+
+    # Norm statistics must come from action data only.
+    norm_dataset_name: Optional[str] = field(default="your_vla_dataset")
+
+
+@dataclass
+class MyHybridDM0ModelConfig(HybridDM0ModelConfig):
+    model_name_or_path: str = field(default="./checkpoints/DM0-base")
+    text_loss_weight: float = field(default=1.0)
+    action_loss_weight: float = field(default=1.0)
+
+
+@dataclass
+class MyHybridDM0Exp(HybridDM0Exp):
+    data_config: MyHybridDM0DataConfig = field(default_factory=MyHybridDM0DataConfig)
+    model_config: MyHybridDM0ModelConfig = field(default_factory=MyHybridDM0ModelConfig)
+
+
+if __name__ == "__main__":
+    exp = MyHybridDM0Exp()
+    exp.train()
+```
+
+Then launch training with:
+
+```bash
+torchrun --nproc_per_node=8 path/to/your_hybrid_dm0_exp.py --train-backend fsdp2
+```
+
+`dataset_name` follows the normal Dexbotic dataset registration mechanism. Multiple registered datasets can be mixed with `+`. The effective VLA/VLM sampling ratio is controlled by the dataset frequencies defined during registration. For action-heavy co-training, define a VLA/action dataset alias with a larger sampling frequency, and keep `norm_dataset_name` pointed at the original action-only dataset.
+
+`text_loss_weight` and `action_loss_weight` control the objective weights after samples are batched. They are independent from dataset sampling frequency: use dataset frequencies to control how often each modality appears, and use loss weights to control the relative scale of the text and action objectives.

@@ -288,7 +288,7 @@ class DM0DataConfig(DataConfig):
         ]
     )
     aug_policy: str | list[str] = field(
-        default_factory=lambda: ["dm0", "dm0_color", "dm0_color"]
+        default_factory=lambda: ["dm0", "color_dm0", "color_dm0"]
     )
     action_config: DM0ActionConfig = field(default_factory=DM0ActionConfig)
     image_pad_mode: str = field(default="zero")
