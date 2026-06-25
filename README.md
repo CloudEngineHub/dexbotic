@@ -29,6 +29,7 @@
 
 ## 🔥 News
 
+- **[2026-06-25]** Added [Co-training](dexbotic/exp/hybrid_dm0_exp.py) capability for the DM0 model. See [Hybrid DM0 Co-Training](docs/DM0.md#hybrid-dm0-co-training) for details.
 - **[2026-06-18]** Released a [DOS-W1 inference tutorial](hardware/docs/dosw1_inference_example.md), covering how to integrate DOS-W1 with Dexbotic.
 - **[2026-06-18]** Added a [DM0 realtime inference guide](docs/DM0RealtimeInference.md) for the Triton-backed realtime backend, including 5x core inference speedup results.
 - **[2026-06-12]** Added a unified [v1 inference API](docs/InferenceAPI.md) for consistent VLA/VLM serving across model wrappers.
