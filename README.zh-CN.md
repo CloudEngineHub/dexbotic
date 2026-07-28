@@ -29,9 +29,17 @@
 
 ## 🔥 最新动态
 
+- **[2026-07-28]** 新增面向 Unitree G1 SONIC 的 [gr00tsonic](playground/example_gr00tsonic_exp.py) 支持，覆盖 DexData 数据转换、训练与策略服务。详情参见 [Unitree G1 SONIC 指南](hardware/unitree_sonic/README.md)。
+- **[2026-06-25]** 新增 DM0 模型的[联合训练](dexbotic/exp/hybrid_dm0_exp.py)能力。详情参见 [Hybrid DM0 Co-Training](docs/DM0.md#hybrid-dm0-co-training)。
+- **[2026-06-18]** 发布了 [DOS-W1 推理教程](hardware/docs/dosw1_inference_example.md)，介绍如何将 DOS-W1 与 Dexbotic 集成。
+- **[2026-06-18]** 新增 [DM0 实时推理指南](docs/DM0RealtimeInference.md)，介绍基于 Triton 的实时后端，并包含核心推理 5 倍加速结果。
+- **[2026-06-12]** 新增统一的 [v1 推理 API](docs/InferenceAPI.md)，用于在不同模型封装间提供一致的 VLA/VLM 服务接口。
+- **[2026-05-15]** 支持 [FSDP2 训练后端](docs/FSDP2.md)，用于更快的分布式训练。
+- **[2026-05-09]** 支持 [Uni-NaVid](playground/example_uninavid_exp.py)，并提供[使用指南](docs/Uni-NaVid.md)。
+- **[2026-04-27]** 支持将 [RLinf 作为 RL 后端](docs/RLinfAsRLBackend.md)，用于 RL 后训练。
 - **[2026-03-30]** 支持 [GR00TN1](playground/benchmarks/libero/libero_gr00tn1.py) 模型。
-- **[2026-03-30]** 新增 Pi05模型的[联合训练](dexbotic/exp/hybrid_pi05_exp.py) 能力。
-- **[2026-03-30]**  发布了 [XLeRobot](hardware/docs/xlerobot_inference_example.md) 在 Dexbotic 中使用的教程。
+- **[2026-03-30]** 新增 Pi05 模型的[联合训练](dexbotic/exp/hybrid_pi05_exp.py)能力。
+- **[2026-03-30]** 发布了 [XLeRobot](hardware/docs/xlerobot_inference_example.md) 在 Dexbotic 中使用的教程。
 - **[2026-02-10]** [DM0](docs/DM0.md) 正式发布！详情参见 [技术报告](https://dexmal.com/DM0_Tech_Report.pdf)。
 - **[2026-02-10]** 合作公告：我们非常高兴地宣布与 [RLinf](https://github.com/RLinf/RLinf) 达成战略合作。双方将共同推进 VLA + RL 的研究与应用。
 - **[2026-01-15]** 发布了 [SO-101](hardware/docs/so101_inference_example.md) 在 Dexbotic 中使用的教程。

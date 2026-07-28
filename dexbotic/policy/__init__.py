@@ -3,6 +3,7 @@ from dexbotic.policy.cogact_policy import CogACTPolicy
 from dexbotic.policy.dm0_policy import DM0Policy
 from dexbotic.policy.discrete_vla_policy import DiscreteVLAPolicy
 from dexbotic.policy.gr00tn1_policy import Gr00tN1Policy
+from dexbotic.policy.gr00tsonic_policy import Gr00tSonicPolicy
 from dexbotic.policy.memvla_policy import MemVLAPolicy
 from dexbotic.policy.oft_policy import OFTPolicy, OFTDiscretePolicy
 from dexbotic.policy.pi0_policy import Pi0Policy
@@ -19,6 +20,7 @@ __all__ = [
     "DM0Policy",
     "DiscreteVLAPolicy",
     "Gr00tN1Policy",
+    "Gr00tSonicPolicy",
     "MemVLAPolicy",
     "OFTPolicy",
     "OFTDiscretePolicy",
