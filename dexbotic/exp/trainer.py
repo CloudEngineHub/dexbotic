@@ -1,5 +1,7 @@
 import math
 import os
+import json
+import re
 from typing import TYPE_CHECKING, Optional
 import shutil
 from unittest.mock import patch
@@ -17,6 +19,90 @@ from dexbotic.model.dexbotic_arch import DexboticVLMModel
 
 if TYPE_CHECKING:
     from dexbotic.exp.base_exp import BaseExp
+
+
+EXTRA_TRAINABLE_STATE_NAME = "extra_trainable_state.safetensors"
+EXTRA_TRAINABLE_META_NAME = "extra_trainable_state.json"
+
+
+def _lora_extra_trainable_config(exp_config) -> tuple[str | None, set[str]]:
+    model_config = getattr(exp_config, "model_config", None)
+    lora_config = getattr(model_config, "lora_config", None)
+    if lora_config is None:
+        return None, set()
+    names = getattr(lora_config, "extra_trainable_names", None) or []
+    return getattr(lora_config, "extra_trainable_regex", None), set(names)
+
+
+def _save_lora_extra_trainable_state(
+    model: torch.nn.Module,
+    output_dir: str,
+    extra_trainable_regex: str | None = None,
+    extra_trainable_names: set[str] | None = None,
+) -> None:
+    """Persist full-rank LoRA companion weights that PEFT adapter saving ignores."""
+
+    extra_trainable_names = extra_trainable_names or set()
+    pattern = re.compile(extra_trainable_regex) if extra_trainable_regex else None
+    if pattern is None and not extra_trainable_names:
+        return
+
+    state = {}
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        if ".lora_" in name:
+            continue
+        if ".modules_to_save." in name:
+            continue
+        if not ((pattern and pattern.search(name)) or name in extra_trainable_names):
+            continue
+        state[name] = parameter.detach().cpu()
+
+    if not state:
+        return
+
+    os.makedirs(output_dir, exist_ok=True)
+    state_path = os.path.join(output_dir, EXTRA_TRAINABLE_STATE_NAME)
+    meta_path = os.path.join(output_dir, EXTRA_TRAINABLE_META_NAME)
+    try:
+        from safetensors.torch import save_file
+
+        save_file(state, state_path)
+    except Exception:
+        torch.save(state, state_path + ".pt")
+        state_path = state_path + ".pt"
+
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "extra_trainable_regex": extra_trainable_regex,
+                "extra_trainable_names": sorted(extra_trainable_names),
+                "state_file": os.path.basename(state_path),
+                "parameter_count": len(state),
+                "numel": int(sum(t.numel() for t in state.values())),
+                "parameter_names": sorted(state),
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
+    logger.info(
+        "Saved LoRA extra trainable full-rank state: {} tensors to {}",
+        len(state),
+        state_path,
+    )
+
+
+def _save_lora_extra_trainable_state_for_trainer(
+    trainer: transformers.Trainer,
+    output_dir: str,
+) -> None:
+    exp_config = getattr(trainer, "exp_config", None)
+    if exp_config is None:
+        return
+    regex, names = _lora_extra_trainable_config(exp_config)
+    _save_lora_extra_trainable_state(trainer.model, output_dir, regex, names)
 
 
 class DexboticTrainer(Trainer):
@@ -299,6 +385,7 @@ class DexboticTrainer(Trainer):
                 run_dir = self._get_output_dir(trial=trial)
                 output_dir = os.path.join(run_dir, checkpoint_folder)
                 self._copy_norm_stats_to_checkpoint(output_dir)
+                _save_lora_extra_trainable_state_for_trainer(self, output_dir)
 
     def _copy_norm_stats_to_checkpoint(self, checkpoint_dir: str) -> None:
         """Copy norm_stats.json from main output directory to checkpoint directory"""
@@ -491,6 +578,8 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer,
     if trainer.deepspeed:
         torch.cuda.synchronize()
         trainer.save_model(output_dir)
+        if trainer.args.should_save:
+            _save_lora_extra_trainable_state_for_trainer(trainer, output_dir)
         return
 
     if getattr(trainer, "is_fsdp_enabled", False):
@@ -499,6 +588,7 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer,
         state_dict = trainer.accelerator.get_state_dict(trainer.model)
         if trainer.args.should_save:
             trainer._save(output_dir, state_dict=state_dict)  # noqa
+            _save_lora_extra_trainable_state_for_trainer(trainer, output_dir)
         trainer.accelerator.wait_for_everyone()
         return
 
@@ -510,3 +600,4 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer,
         }
         del state_dict
         trainer._save(output_dir, state_dict=cpu_state_dict)  # noqa
+        _save_lora_extra_trainable_state_for_trainer(trainer, output_dir)

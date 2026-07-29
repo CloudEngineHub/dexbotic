@@ -29,6 +29,8 @@
 
 ## 🔥 最新动态
 
+- **[2026-07-29]** 新增 [PI05 LIBERO LoRA SFT](docs/LiberoLora.md#pi05-lora-recipe) 支持，详见 [PI05 LoRA](playground/benchmarks/libero/libero_pi05_lora.py)。
+- **[2026-07-29]** 新增 [PI0 LIBERO LoRA SFT](docs/LiberoLora.md#pi0-lora-recipe) 支持，详见 [PI0 LoRA](playground/benchmarks/libero/libero_pi0_lora.py)。
 - **[2026-07-28]** 新增面向 Unitree G1 SONIC 的 [gr00tsonic](playground/example_gr00tsonic_exp.py) 支持，覆盖 DexData 数据转换、训练与策略服务。详情参见 [Unitree G1 SONIC 指南](hardware/unitree_sonic/README.md)。
 - **[2026-06-25]** 新增 DM0 模型的[联合训练](dexbotic/exp/hybrid_dm0_exp.py)能力。详情参见 [Hybrid DM0 Co-Training](docs/DM0.md#hybrid-dm0-co-training)。
 - **[2026-06-18]** 发布了 [DOS-W1 推理教程](hardware/docs/dosw1_inference_example.md)，介绍如何将 DOS-W1 与 Dexbotic 集成。

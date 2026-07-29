@@ -82,6 +82,9 @@ class Pi05Config(DexboticConfig):
             self.llm_config = CONFIG_MAPPING[llm_config["model_type"]](**llm_config)
         elif isinstance(llm_config, str):
             self.llm_config = AutoConfig.from_pretrained(llm_config)
+        llm_config = getattr(self, "llm_config", None)
+        if not hasattr(self, "vocab_size") and hasattr(llm_config, "vocab_size"):
+            self.vocab_size = llm_config.vocab_size
 
 
 class Pi05Model(DexboticVLMModel):
@@ -311,9 +314,10 @@ class Pi05ForCausalLM(DexboticForCausalLM, ActionOutputForCausalLM):
         ar_mask = []
         tokens = []
 
+        action_hidden_size = self.config.action_config.hidden_size
         time_emb = posemb_sincos(
             time,
-            self.model.action_in_proj.out_features,
+            action_hidden_size,
             min_period=4e-3,
             max_period=4.0,
         )

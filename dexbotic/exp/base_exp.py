@@ -1125,6 +1125,24 @@ class BaseExp(Config):
 
         return last_checkpoint
 
+    def _patch_peft_resume_tensor_parallel_import(self) -> None:
+        try:
+            import transformers.integrations.tensor_parallel as tensor_parallel
+        except Exception:
+            return
+
+        if hasattr(tensor_parallel, "EmbeddingParallel"):
+            return
+
+        class EmbeddingParallel:
+            pass
+
+        tensor_parallel.EmbeddingParallel = EmbeddingParallel
+        if self.local_rank == 0:
+            logger.info(
+                "Patched missing transformers.integrations.tensor_parallel.EmbeddingParallel for PEFT resume compatibility"
+            )
+
     def _log_fsdp_runtime_state(self) -> None:
         if self.local_rank != 0:
             return
@@ -1196,6 +1214,49 @@ class BaseExp(Config):
             )
         self.model.to(dtype=torch.bfloat16)
 
+    def _training_runtime_model(self):
+        """Return the underlying VLM when the trainable model is PEFT-wrapped."""
+
+        model = self.model
+        if hasattr(model, "get_base_model"):
+            try:
+                return model.get_base_model()
+            except Exception:
+                pass
+
+        base_model = getattr(model, "base_model", None)
+        candidate = getattr(base_model, "model", None)
+        if candidate is not None:
+            return candidate
+
+        candidate = getattr(model, "model", None)
+        if candidate is not None and hasattr(candidate, "model"):
+            return candidate
+
+        return model
+
+    def _set_training_use_cache(self, enabled: bool) -> None:
+        runtime_model = self._training_runtime_model()
+        if hasattr(runtime_model, "config"):
+            runtime_model.config.use_cache = enabled
+
+        inner_model = getattr(runtime_model, "model", None)
+        llm = getattr(inner_model, "llm", None)
+        if llm is not None and hasattr(llm, "config"):
+            llm.config.use_cache = enabled
+
+    def _training_image_processor(self):
+        runtime_model = self._training_runtime_model()
+        inner_model = getattr(runtime_model, "model", None)
+        vision_module = getattr(inner_model, "mm_vision_module", None)
+        if vision_module is None:
+            vision_module = getattr(inner_model, "mm_vision_tower", None)
+        if vision_module is None or not hasattr(vision_module, "image_processor"):
+            raise AttributeError(
+                "Unable to locate image_processor on the training model"
+            )
+        return vision_module.image_processor
+
     def _initialize_train(self):
         self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
 
@@ -1227,12 +1288,14 @@ class BaseExp(Config):
             self.data_config.action_config.vocab_size,
             self.tokenizer,
             self.model)
-        self.model.config.use_cache = False
-        self.model.model.llm.config.use_cache = False
+        self._set_training_use_cache(False)
 
         # Step 3: build dataloader
         train_dataset, data_collator = self.data_config.build_data(
-            self.tokenizer, self.model_config.chat_template, self.model.model.mm_vision_module.image_processor, )
+            self.tokenizer,
+            self.model_config.chat_template,
+            self._training_image_processor(),
+        )
 
         # step 4: build trainer
         trainer_kwargs = {
@@ -1294,13 +1357,13 @@ class BaseExp(Config):
             resume_checkpoint = self._resolve_auto_resume_checkpoint()
             if resume_checkpoint is not None:
                 logger.info("Resuming training from checkpoint {}", resume_checkpoint)
+                self._patch_peft_resume_tensor_parallel_import()
                 self.trainer.train(resume_from_checkpoint=resume_checkpoint)
             else:
                 self.trainer.train()
 
             self.trainer.save_state()
-            self.model.config.use_cache = True
-            self.model.model.llm.config.use_cache = True
+            self._set_training_use_cache(True)
             safe_save_model_for_hf_trainer(
                 trainer=self.trainer,
                 output_dir=self.trainer_config.output_dir)

@@ -37,8 +37,26 @@ from dexbotic.exp.pi05_exp import Pi0TokenizerConfig as _Pi0TokenizerConfig
 from dexbotic.exp.pi05_exp import Pi05TrainerConfig as _Pi05TrainerConfig
 from dexbotic.exp.pi05_exp import Pi05Exp as _Pi05Exp
 from dexbotic.exp.pi05_exp import Pi05ModelConfig as _Pi05ModelConfig
-from dexbotic.model.pi05.pi05_arch import Pi05ForCausalLM
+from dexbotic.model.pi05.pi05_arch import Pi05Config, Pi05ForCausalLM
 from dexbotic.tokenization.process import Pi0Tokenization
+
+
+def _set_libero_pi05_runtime_config(model) -> None:
+    chunk_size = 10
+    for owner in (model, getattr(model, "model", None)):
+        config = getattr(owner, "config", None)
+        if config is not None and hasattr(config, "chunk_size"):
+            config.chunk_size = chunk_size
+    logger.info("Using PI05 Libero runtime chunk_size={}", chunk_size)
+
+
+def load_pi05_libero_model(model_name_or_path: str, **from_pretrained_kwargs):
+    config = Pi05Config.from_pretrained(model_name_or_path)
+    model = Pi05ForCausalLM.from_pretrained(
+        model_name_or_path, config=config, **from_pretrained_kwargs
+    )
+    _set_libero_pi05_runtime_config(model)
+    return model
 
 
 def parse_args():
@@ -51,6 +69,8 @@ def parse_args():
     )
     parser.add_argument(
         "--train-backend",
+        "--trainer_backend",
+        dest="train_backend",
         type=str,
         default=None,
         choices=["deepspeed", "fsdp", "fsdp2", "ddp"],
@@ -151,9 +171,7 @@ class Pi05ModelConfig(_Pi05ModelConfig):
     model_name_or_path: str = field(default="./checkpoints/Dexbotic-PI05")
 
     def build_model(self) -> Pi05ForCausalLM:
-        model = Pi05ForCausalLM.from_pretrained(self.model_name_or_path)
-        model.model.config.chunk_size = 10
-        return model
+        return load_pi05_libero_model(self.model_name_or_path)
 
 
 @dataclass
@@ -178,7 +196,7 @@ class Pi05InferenceConfig(_Pi0InferenceConfig):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         logger.info(f"Loading model from {self.model_name_or_path}")
         logger.info(f"Using device: {self.device}")
-        model = Pi05ForCausalLM.from_pretrained(
+        model = load_pi05_libero_model(
             self.model_name_or_path,
             torch_dtype=torch.float32,
             low_cpu_mem_usage=True,
