@@ -31,7 +31,7 @@
 
 - **[2026-07-29]** Added [PI05 LIBERO LoRA SFT](docs/LiberoLora.md#pi05-lora-recipe) support; see the [PI05 LoRA](playground/benchmarks/libero/libero_pi05_lora.py) for details.
 - **[2026-07-29]** Added [PI0 LIBERO LoRA SFT](docs/LiberoLora.md#pi0-lora-recipe) support; see the [PI0 LoRA](playground/benchmarks/libero/libero_pi0_lora.py) for details.
-- **[2026-07-28]** Added [gr00tsonic](playground/example_gr00tsonic_exp.py) support for Unitree G1 SONIC, covering DexData conversion, training, and policy serving. See the [Unitree G1 SONIC guide](hardware/unitree_sonic/README.md).
+- **[2026-07-28]** Added [gr00tsonic](playground/example_gr00tsonic_exp.py) support for Unitree G1 SONIC. See the [Unitree G1 SONIC guide](hardware/unitree_sonic/README.md).
 - **[2026-06-25]** Added [Co-training](dexbotic/exp/hybrid_dm0_exp.py) capability for the DM0 model. See [Hybrid DM0 Co-Training](docs/DM0.md#hybrid-dm0-co-training) for details.
 - **[2026-06-18]** Released a [DOS-W1 inference tutorial](hardware/docs/dosw1_inference_example.md), covering how to integrate DOS-W1 with Dexbotic.
 - **[2026-06-18]** Added a [DM0 realtime inference guide](docs/DM0RealtimeInference.md) for the Triton-backed realtime backend, including 5x core inference speedup results.
