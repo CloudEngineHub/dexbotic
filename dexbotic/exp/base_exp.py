@@ -240,7 +240,7 @@ class TrainerConfig(Config):
     """
 
     train_backend: str = field(default='deepspeed')
-    deepspeed: Optional[str] = field(default='./script/deepspeed/zero3.json')
+    deepspeed: Optional[str] = field(default='./script/deepspeed/zero2.json')
     fsdp: Optional[str] = field(default=None)
     fsdp_config: Optional[dict] = field(default=None)
     fsdp_version: Optional[int] = field(default=None)
