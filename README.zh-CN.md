@@ -29,6 +29,8 @@
 
 ## 🔥 最新动态
 
+- **[2026-08-06]** 新增 [CogACT LIBERO LoRA SFT](docs/LiberoLora.md#cogact-lora-recipe) 支持，详见 [CogACT LoRA](playground/benchmarks/libero/libero_cogact_lora.py)。
+- **[2026-08-06]** 新增 [DM0 LIBERO LoRA SFT](docs/LiberoLora.md#dm0-lora-recipe) 支持，详见 [DM0 LoRA](playground/benchmarks/libero/libero_dm0_lora.py)。
 - **[2026-07-29]** 新增 [PI05 LIBERO LoRA SFT](docs/LiberoLora.md#pi05-lora-recipe) 支持，详见 [PI05 LoRA](playground/benchmarks/libero/libero_pi05_lora.py)。
 - **[2026-07-29]** 新增 [PI0 LIBERO LoRA SFT](docs/LiberoLora.md#pi0-lora-recipe) 支持，详见 [PI0 LoRA](playground/benchmarks/libero/libero_pi0_lora.py)。
 - **[2026-07-28]** 新增 [gr00tsonic](playground/example_gr00tsonic_exp.py) 对 Unitree G1 SONIC 的支持。详情参见 [Unitree G1 SONIC 指南](hardware/unitree_sonic/README.md)。

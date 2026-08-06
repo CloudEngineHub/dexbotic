@@ -29,6 +29,8 @@
 
 ## 🔥 News
 
+- **[2026-08-06]** Added [CogACT LIBERO LoRA SFT](docs/LiberoLora.md#cogact-lora-recipe) support; see the [CogACT LoRA](playground/benchmarks/libero/libero_cogact_lora.py) for details.
+- **[2026-08-06]** Added [DM0 LIBERO LoRA SFT](docs/LiberoLora.md#dm0-lora-recipe) support; see the [DM0 LoRA](playground/benchmarks/libero/libero_dm0_lora.py) for details.
 - **[2026-07-29]** Added [PI05 LIBERO LoRA SFT](docs/LiberoLora.md#pi05-lora-recipe) support; see the [PI05 LoRA](playground/benchmarks/libero/libero_pi05_lora.py) for details.
 - **[2026-07-29]** Added [PI0 LIBERO LoRA SFT](docs/LiberoLora.md#pi0-lora-recipe) support; see the [PI0 LoRA](playground/benchmarks/libero/libero_pi0_lora.py) for details.
 - **[2026-07-28]** Added [gr00tsonic](playground/example_gr00tsonic_exp.py) support for Unitree G1 SONIC. See the [Unitree G1 SONIC guide](hardware/unitree_sonic/README.md).
