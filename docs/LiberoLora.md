@@ -1,8 +1,8 @@
 # LIBERO LoRA SFT Training
 
 This page is the shared developer reference for LIBERO LoRA SFT recipes. It
-currently covers PI0 and PI05; add DM0 and CogACT sections here when those LoRA
-recipes are promoted.
+currently covers PI0, PI05, and DM0; add CogACT here when its LoRA recipe is
+promoted.
 
 Full SFT entrypoints are listed only as baseline references. New LIBERO LoRA
 work should use the LoRA entrypoints in `playground/benchmarks/libero`.
@@ -11,6 +11,7 @@ work should use the LoRA entrypoints in `playground/benchmarks/libero`.
 | --- | --- | --- | --- |
 | PI0 | `playground/benchmarks/libero/libero_pi0.py` | `playground/benchmarks/libero/libero_pi0_lora.py` | DDP only |
 | PI05 | `playground/benchmarks/libero/libero_pi05.py` | `playground/benchmarks/libero/libero_pi05_lora.py` | DDP only |
+| DM0 | `playground/benchmarks/libero/libero_dm0.py` | `playground/benchmarks/libero/libero_dm0_lora.py` | DDP only |
 
 ## Effectiveness Reference
 
@@ -46,9 +47,20 @@ Full SFT baseline reached `1918/2000 = 95.90%` at 50k.
 At 40k, the same checkpoint family shows LoRA at `1928/2000 = 96.40%` versus
 Full SFT at `1912/2000 = 95.60%`, a `+0.80 pp` same-step gain.
 
+### DM0
+
+The validated DM0 LoRA recipe reached `1855/2000 = 92.75%` at 148k. The best
+DM0 Full SFT baseline reached `1900/2000 = 95.00%` at 138k and 142k.
+
+| Recipe | Checkpoint | Overall LIBERO success | Note |
+| --- | ---: | ---: | --- |
+| Full SFT | 138k / 142k | `1900/2000 = 95.00%` | Best validated Full baseline |
+| LoRA SFT | 148k | `1855/2000 = 92.75%` | Best validated LoRA checkpoint |
+| Gap | - | `-2.25 pp` | LoRA uses about 2.14% trainable parameters |
+
 ## LIBERO Data
 
-Both PI0 and PI05 recipes use the built-in `libero_pi0_all` training target.
+PI0, PI05, and DM0 use the built-in `libero_pi0_all` training target.
 
 | Field | Value |
 | --- | --- |
@@ -72,7 +84,8 @@ Each JSONL row should include image references, robot state, action, and prompt.
 
 PI0 stacks 50 future actions, trains with delta action targets, and converts the
 output back to absolute LIBERO actions for inference. PI05 uses a 10-step action
-chunk and should run LoRA training and LoRA inference with `chunk_size=10`.
+chunk and should run LoRA training and LoRA inference with `chunk_size=10`. DM0
+uses a 50-step action trajectory and the same three-view LIBERO input layout.
 
 ## Prepare a Docker Workspace
 
@@ -120,8 +133,13 @@ huggingface-cli download Dexmal/Dexbotic-PI05 \
   --local-dir checkpoints/Dexbotic-PI05 \
   --local-dir-use-symlinks False
 
+huggingface-cli download Dexmal/DM0-base \
+  --local-dir checkpoints/DM0-base \
+  --local-dir-use-symlinks False
+
 test -f checkpoints/Dexbotic-PI0/config.json
 test -f checkpoints/Dexbotic-PI05/config.json
+test -f checkpoints/DM0-base/config.json
 ```
 
 Keep each full model directory intact, including processor and tokenizer files.
@@ -170,6 +188,7 @@ trainer path. To precompute them explicitly:
 ```bash
 python playground/benchmarks/libero/libero_pi0.py --task compute_norm_stats
 python playground/benchmarks/libero/libero_pi05.py --task compute_norm_stats
+python playground/benchmarks/libero/libero_dm0_lora.py --task compute_norm_stats
 ```
 
 Recompute norm stats if the dataset, action representation, action chunk length,
@@ -331,6 +350,77 @@ python playground/benchmarks/libero/libero_pi05_lora.py \
 If the base model path recorded in `adapter_config.json` is not available on the
 inference machine, pass `--base_model_name_or_path /path/to/Dexbotic-PI05` or
 place the base model at the recorded path before starting inference.
+
+## DM0 LoRA Recipe
+
+| Item | Reference value |
+| --- | --- |
+| Base model | `checkpoints/DM0-base` |
+| Dataset / augmentation | `libero_pi0_all` / `dm0,color_dm0,color_dm0` |
+| Training backend | DDP only |
+| LoRA target modules | `all-linear`, excluding `lm_head` |
+| LoRA rank / alpha / dropout | `32` / `16` / `0.0` |
+| Dense modules to save | `action_in_proj`, `action_out_proj`, `action_time_mlp_in`, `action_time_mlp_out` |
+| Global batch | `64` on 8 GPUs |
+| Per-device batch | `4` |
+| Gradient accumulation | `2` |
+| Train steps | `150,000` |
+| Save interval / retention | `2,000` / `80` checkpoints |
+| Optimizer | AdamW over LoRA weights and `modules_to_save` dense weights |
+| LR / warmup | `5e-4` / `500` |
+| Gradient checkpointing | disabled |
+| Model max length | `200` |
+| Action trajectory length | `50` |
+
+Run from inside the Docker container. DM0 LoRA SFT is supported only with DDP;
+the entrypoint rejects DeepSpeed and FSDP backends. The validated recipe uses 8
+GPUs for global batch 64:
+
+```bash
+NPROC_PER_NODE=8
+
+torchrun --nproc_per_node="${NPROC_PER_NODE}" \
+  playground/benchmarks/libero/libero_dm0_lora.py \
+  --task train \
+  --train-backend ddp
+```
+
+The default output directory is:
+
+```text
+user_checkpoints/dexbotic/libero_all_dm0/dm0_lora_sft_libero_150k
+```
+
+The trainable summary is written to:
+
+```text
+user_checkpoints/dexbotic/libero_all_dm0/trainable_summaries/dm0_lora_sft_libero_150k.json
+```
+
+Check the summary before trusting a run:
+
+- `r` should be `32` and `lora_alpha` should be `16`.
+- `target_modules` should cover linear layers in the language, vision, action
+  expert, and projector paths without including `lm_head`.
+- `modules_to_save` should contain all four action projection/time MLP modules.
+- `unexpected_trainable_parameters` should be empty.
+- The trainable ratio should be approximately `2.14%` for the reference model.
+
+For inference, pass a LoRA checkpoint path to `--model_name_or_path`. The loader
+reads `adapter_config.json`, loads the recorded DM0 base model, and merges the
+adapter before serving.
+
+```bash
+python playground/benchmarks/libero/libero_dm0_lora.py \
+  --task inference \
+  --model_name_or_path \
+  user_checkpoints/dexbotic/libero_all_dm0/dm0_lora_sft_libero_150k/checkpoint-148000 \
+  --port 7891
+```
+
+If the base model path recorded in `adapter_config.json` is not available on the
+inference machine, pass `--base_model_name_or_path /path/to/DM0-base` or place
+the base model at the recorded path before starting inference.
 
 For a single-GPU smoke test, reduce `NPROC_PER_NODE` to `1` and edit the
 selected experiment file to lower `num_train_steps` and `save_steps`. Do not use

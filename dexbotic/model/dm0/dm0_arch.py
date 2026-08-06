@@ -9,12 +9,7 @@ from typing import List, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import (
-    AutoConfig,
-    CONFIG_MAPPING,
-    DynamicCache,
-    Qwen3ForCausalLM,
-)
+from transformers import CONFIG_MAPPING, AutoConfig, DynamicCache, Qwen3ForCausalLM
 from transformers.models.qwen3 import modeling_qwen3
 
 from dexbotic.model.dexbotic_arch import (
@@ -58,6 +53,9 @@ class DM0Config(DexboticConfig):
             self.llm_config = CONFIG_MAPPING[llm_config["model_type"]](**llm_config)
         elif isinstance(llm_config, str):
             self.llm_config = AutoConfig.from_pretrained(llm_config)
+        llm_config = getattr(self, "llm_config", None)
+        if not hasattr(self, "vocab_size") and hasattr(llm_config, "vocab_size"):
+            self.vocab_size = llm_config.vocab_size
 
 
 class DM0Model(DexboticVLMModel):
@@ -98,8 +96,12 @@ class DM0Model(DexboticVLMModel):
                 device=self.mm_vision_tower.device, dtype=self.mm_vision_tower.dtype
             )
         )
-        projector_dtype = getattr(getattr(self.mm_projector, "weight", None), "dtype", vision_features.dtype)
-        projector_device = getattr(getattr(self.mm_projector, "weight", None), "device", vision_features.device)
+        projector_dtype = getattr(
+            getattr(self.mm_projector, "weight", None), "dtype", vision_features.dtype
+        )
+        projector_device = getattr(
+            getattr(self.mm_projector, "weight", None), "device", vision_features.device
+        )
         image_features = self.mm_projector(
             vision_features.to(device=projector_device, dtype=projector_dtype)
         )
@@ -227,12 +229,8 @@ class DM0ForCausalLM(DexboticForCausalLM, ActionOutputForCausalLM):
                 )
             elif cache_length > layer_idx:
                 cached_keys, cached_values = past_key_values[layer_idx]
-                key_states = torch.cat(
-                    [cached_keys, key_states], dim=-2
-                )
-                value_states = torch.cat(
-                    [cached_values, value_states], dim=-2
-                )
+                key_states = torch.cat([cached_keys, key_states], dim=-2)
+                value_states = torch.cat([cached_values, value_states], dim=-2)
 
         attn_output, _ = modeling_qwen3.eager_attention_forward(
             layers[0].self_attn,
@@ -448,16 +446,20 @@ class DM0ForCausalLM(DexboticForCausalLM, ActionOutputForCausalLM):
         u_t = noise - actions
 
         # Embed prefix (images + language)
-        prefix_hidden_states, prefix_padding_mask, prefix_attn_mask = (
-            self.get_prefix_hidden_states(
-                input_ids, attention_mask, images, image_masks
-            )
+        (
+            prefix_hidden_states,
+            prefix_padding_mask,
+            prefix_attn_mask,
+        ) = self.get_prefix_hidden_states(
+            input_ids, attention_mask, images, image_masks
         )
 
         # Embed suffix (actions + time)
-        suffix_hidden_states, suffix_padding_mask, suffix_attn_mask = (
-            self.get_suffix_hidden_states(x_t, time)
-        )
+        (
+            suffix_hidden_states,
+            suffix_padding_mask,
+            suffix_attn_mask,
+        ) = self.get_suffix_hidden_states(x_t, time)
 
         if self.model.config.bf16:
             suffix_hidden_states = suffix_hidden_states.to(dtype=torch.bfloat16)
@@ -543,10 +545,12 @@ class DM0ForCausalLM(DexboticForCausalLM, ActionOutputForCausalLM):
         time = torch.tensor(1.0, device=device, dtype=dtype)
 
         # Embed prefix and compute KV cache
-        prefix_hidden_states, prefix_padding_mask, prefix_attn_mask = (
-            self.get_prefix_hidden_states(
-                input_ids, attention_mask, images, image_masks
-            )
+        (
+            prefix_hidden_states,
+            prefix_padding_mask,
+            prefix_attn_mask,
+        ) = self.get_prefix_hidden_states(
+            input_ids, attention_mask, images, image_masks
         )
 
         # Build attention mask
@@ -614,9 +618,11 @@ class DM0ForCausalLM(DexboticForCausalLM, ActionOutputForCausalLM):
             Tuple of (updated x_t, updated time).
         """
         # Embed suffix
-        suffix_hidden_states, suffix_padding_mask, suffix_attn_mask = (
-            self.get_suffix_hidden_states(x_t, time.broadcast_to(batch_size))
-        )
+        (
+            suffix_hidden_states,
+            suffix_padding_mask,
+            suffix_attn_mask,
+        ) = self.get_suffix_hidden_states(x_t, time.broadcast_to(batch_size))
 
         # Build suffix attention mask
         suffix_attn_mask_2d = make_suffix_attn_mask_2d(

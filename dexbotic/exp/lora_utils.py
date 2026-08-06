@@ -23,7 +23,12 @@ def read_lora_base_model_path(adapter_path: str) -> str | None:
     return payload.get("base_model_name_or_path") or None
 
 
-def resolve_lora_tokenizer_path(model_name_or_path: str) -> str:
+def resolve_lora_tokenizer_path(
+    model_name_or_path: str,
+    base_model_name_or_path: str | None = None,
+) -> str:
+    if base_model_name_or_path and is_lora_checkpoint(model_name_or_path):
+        return base_model_name_or_path
     if os.path.exists(os.path.join(model_name_or_path, "tokenizer_config.json")):
         return model_name_or_path
     if is_lora_checkpoint(model_name_or_path):
@@ -59,6 +64,44 @@ def patch_peft_tied_weights_keys_compat(
         )
 
 
+def cast_trainable_parameters_to_model_dtype(
+    model: torch.nn.Module,
+    model_label: str,
+) -> None:
+    target_dtype = next(
+        (
+            parameter.dtype
+            for parameter in model.parameters()
+            if not parameter.requires_grad and parameter.is_floating_point()
+        ),
+        None,
+    )
+    if target_dtype is None:
+        return
+
+    cast_names: list[str] = []
+    for name, parameter in model.named_parameters():
+        if (
+            not parameter.requires_grad
+            or not parameter.is_floating_point()
+            or parameter.dtype == target_dtype
+        ):
+            continue
+        parameter.data = parameter.data.to(dtype=target_dtype)
+        if parameter.grad is not None:
+            parameter.grad.data = parameter.grad.data.to(dtype=target_dtype)
+        cast_names.append(name)
+
+    if cast_names:
+        logger.info(
+            "Cast {} {} LoRA trainable parameters to model dtype {}: {}",
+            len(cast_names),
+            model_label,
+            target_dtype,
+            cast_names[:20],
+        )
+
+
 def apply_peft_lora(
     model: torch.nn.Module,
     lora_config,
@@ -72,22 +115,29 @@ def apply_peft_lora(
             f"{model_label} LoRA requires `peft` to be installed in the training environment"
         ) from exc
 
-    peft_config = LoraConfig(
-        task_type=TaskType.CAUSAL_LM,
-        r=lora_config.r,
-        lora_alpha=lora_config.lora_alpha,
-        lora_dropout=lora_config.lora_dropout,
-        bias=lora_config.bias,
-        target_modules=lora_config.target_modules,
-        modules_to_save=lora_config.modules_to_save,
-    )
+    peft_kwargs = {
+        "task_type": TaskType.CAUSAL_LM,
+        "r": lora_config.r,
+        "lora_alpha": lora_config.lora_alpha,
+        "lora_dropout": lora_config.lora_dropout,
+        "bias": lora_config.bias,
+        "target_modules": lora_config.target_modules,
+        "modules_to_save": lora_config.modules_to_save,
+    }
+    exclude_modules = getattr(lora_config, "exclude_modules", None)
+    if exclude_modules is not None:
+        peft_kwargs["exclude_modules"] = exclude_modules
+    peft_config = LoraConfig(**peft_kwargs)
     peft_config.base_model_name_or_path = base_model_name_or_path or ""
 
     if hasattr(model, "enable_input_require_grads"):
         model.enable_input_require_grads()
 
     patch_peft_tied_weights_keys_compat(model, model_label)
-    return get_peft_model(model, peft_config), peft_config
+    model = get_peft_model(model, peft_config)
+    if getattr(lora_config, "cast_trainable_to_model_dtype", False):
+        cast_trainable_parameters_to_model_dtype(model, model_label)
+    return model, peft_config
 
 
 def _jsonable(value):
