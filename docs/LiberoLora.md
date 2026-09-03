@@ -1,7 +1,7 @@
 # LIBERO LoRA SFT Training
 
 This page is the shared developer reference for LIBERO LoRA SFT recipes. It
-currently covers PI0, PI05, DM0, and CogACT.
+currently covers PI0, PI05, DM0, CogACT, and DM05.
 
 Full SFT entrypoints are listed only as baseline references. New LIBERO LoRA
 work should use the LoRA entrypoints in `playground/benchmarks/libero`.
@@ -12,6 +12,7 @@ work should use the LoRA entrypoints in `playground/benchmarks/libero`.
 | PI05 | `playground/benchmarks/libero/libero_pi05.py` | `playground/benchmarks/libero/libero_pi05_lora.py` | DDP only |
 | DM0 | `playground/benchmarks/libero/libero_dm0.py` | `playground/benchmarks/libero/libero_dm0_lora.py` | DDP only |
 | CogACT | `playground/benchmarks/libero/libero_cogact.py` | `playground/benchmarks/libero/libero_cogact_lora.py` | DDP only |
+| DM05 | `playground/benchmarks/libero/libero_dm05.py` | `playground/benchmarks/libero/libero_dm05_lora.py` | DDP only |
 
 ## Effectiveness Reference
 
@@ -73,9 +74,23 @@ The final LoRA checkpoint at 150k reached `1921/2000 = 96.05%`. Both results
 use 7D LIBERO actions, one training camera, no augmentation, and the complete
 four-suite 2,000-episode protocol.
 
+### DM05
+
+The validated DM05 LoRA recipe reached `1966/2000 = 98.30%` at 49k. The best
+Full SFT baseline reached `1980/2000 = 99.0%` at 50k.
+
+| Recipe | Checkpoint | Overall LIBERO success | Note |
+| --- | ---: | ---: | --- |
+| Full SFT | 50k | `1980/2000 = 99.0%` | Best Full baseline |
+| LoRA SFT | 49k | `1966/2000 = 98.30%` | Best validated LoRA checkpoint |
+| Gap | - | `-0.70 pp` | LoRA remains within 1 pp of Full |
+
+At 20k / 30k / 40k, the same LoRA run reached `84.55%` / `93.95%` /
+`98.00%`. All scores use the four-suite 2,000-episode protocol.
+
 ## LIBERO Data
 
-PI0, PI05, DM0, and CogACT use the built-in `libero_pi0_all` training target.
+PI0, PI05, DM0, CogACT, and DM05 use the built-in `libero_pi0_all` training target.
 
 | Field | Value |
 | --- | --- |
@@ -103,7 +118,8 @@ chunk and should run LoRA training and LoRA inference with `chunk_size=10`. DM0
 uses a 50-step action trajectory and the same three-view LIBERO input layout.
 CogACT uses the first camera, a 16-step action chunk, and raw 7D actions. Its
 entrypoint computes a separate raw-action norm-stat cache so older delta-action
-or 8D CogACT statistics are not reused.
+or 8D CogACT statistics are not reused. DM05 uses `agentview` + `wrist` and a
+10-step absolute chunk; inference needs `norm_stats.json` beside the checkpoint.
 
 ## Prepare a Docker Workspace
 
@@ -155,6 +171,10 @@ huggingface-cli download Dexmal/DM0-base \
   --local-dir checkpoints/DM0-base \
   --local-dir-use-symlinks False
 
+huggingface-cli download Dexmal/DM05 \
+  --local-dir checkpoints/DM05 \
+  --local-dir-use-symlinks False
+
 huggingface-cli download Dexmal/Dexbotic-Base \
   --local-dir checkpoints/Dexbotic-Base \
   --local-dir-use-symlinks False
@@ -162,6 +182,7 @@ huggingface-cli download Dexmal/Dexbotic-Base \
 test -f checkpoints/Dexbotic-PI0/config.json
 test -f checkpoints/Dexbotic-PI05/config.json
 test -f checkpoints/DM0-base/config.json
+test -f checkpoints/DM05/config.json
 test -f checkpoints/Dexbotic-Base/config.json
 ```
 
@@ -214,6 +235,7 @@ python playground/benchmarks/libero/libero_pi05.py --task compute_norm_stats
 python playground/benchmarks/libero/libero_dm0_lora.py --task compute_norm_stats
 python playground/benchmarks/libero/libero_cogact_lora.py \
   --task compute_norm_stats
+python playground/benchmarks/libero/libero_dm05_lora.py --task compute_norm_stats
 ```
 
 Recompute norm stats if the dataset, action representation, action chunk length,
@@ -525,6 +547,86 @@ python playground/benchmarks/libero/libero_cogact_lora.py \
 If `adapter_config.json` records a base model path that is reachable on the
 inference machine, `--base_model_name_or_path` can be omitted.
 
+## DM05 LoRA Recipe
+
+`libero_dm05.py` is FSDP2 full SFT. `libero_dm05_lora.py` is DDP LoRA.
+
+| Item | Reference value |
+| --- | --- |
+| Base model | `checkpoints/DM05` |
+| Dataset | `libero_pi0_all` |
+| Views / cameras | `2` (`agentview` + `wrist`) |
+| Training backend | DDP (`deepspeed=None`) |
+| Extra install | `pip install "peft>=0.13.0"` |
+| LoRA target modules | `all-linear`, excluding `lm_head` |
+| LoRA rank / alpha / dropout | `32` / `16` / `0.0` |
+| Dense modules to save | `action_in_proj`, `action_out_proj`, `time_mlp_in`, `time_mlp_out`, `final_time_modulator`, plus `input_time_modulators.*` and `mlp_time_modulators.*` |
+| Global batch | `32` on 8 GPUs |
+| Per-device batch | `4` |
+| Gradient accumulation | `1` |
+| Train steps | `50,000` |
+| Save interval | `10,000` steps |
+| Optimizer | AdamW over LoRA weights and `modules_to_save` dense weights |
+| LR / warmup | `5e-4` / `500` |
+| LLM / vision / action attention | `eager` / `sdpa` / `sdpa` |
+| VLM / AE gradient checkpointing | on |
+| Model max length | `1024` |
+| Action dimension / chunk | `7` valid (padded `32D`) / `10` absolute |
+| HF sidecar | `checkpoint-{step}-hf` (`save_hf_sidecar=True`) |
+
+Run from inside the Docker container. The playground default is DDP. On
+multi-GPU 4090 set `NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1`.
+
+```bash
+NPROC_PER_NODE=8
+
+# multi-GPU 4090 only
+# export NCCL_P2P_DISABLE=1
+# export NCCL_IB_DISABLE=1
+
+torchrun --nproc_per_node="${NPROC_PER_NODE}" \
+  playground/benchmarks/libero/libero_dm05_lora.py \
+  --task train \
+  --train-backend ddp
+```
+
+The default output directory uses the launch date:
+
+```text
+user_checkpoints/dexbotic/libero_dm05_lora/libero-lora-MMDD
+```
+
+This entrypoint does not write a `trainable_summaries/*.json` file. Before
+trusting a run, check `adapter_config.json` on a saved checkpoint:
+
+- `r` should be `32` and `lora_alpha` should be `16`.
+- `target_modules` should resolve from `all-linear` and must not include
+  `lm_head`.
+- `modules_to_save` should include the action/time projection modules listed
+  above.
+
+LoRA checkpoints keep the PEFT adapter, tokenizer/processor files, and
+`norm_stats.json` together. Infer also accepts a `checkpoint-{step}-hf`
+sidecar:
+
+```text
+adapter_config.json
+adapter_model.safetensors
+norm_stats.json
+```
+
+For inference, point `DM05InferenceConfig.model_name_or_path` at the run
+directory or a `checkpoint-*-hf`, then:
+
+```bash
+python playground/benchmarks/libero/libero_dm05_lora.py --task inference
+```
+
+The loader reads `adapter_config.json`, loads the recorded base model, and
+merges the adapter before serving. If that base path is missing on the
+inference machine, place Dexmal/DM05 at `./checkpoints/DM05` or edit
+`base_model_name_or_path` in `adapter_config.json`.
+
 For a single-GPU smoke test, reduce `NPROC_PER_NODE` to `1` and edit the
-selected experiment file to lower `num_train_steps` and `save_steps`. Do not use
-a smoke test to judge the final recipe quality.
+playground file to lower `num_train_steps` and `save_steps`. Do not use a
+smoke test to judge the final recipe quality.

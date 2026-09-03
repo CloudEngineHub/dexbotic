@@ -29,6 +29,7 @@
 
 ## 🔥 最新动态
 
+- **[2026-09-01]** [DM05](docs/DM05.md) 正式发布！详情参见 [技术报告](https://www.dexmal.com/blog/dm0.5)。LIBERO full SFT 与 LoRA 见 [libero_dm05.py](playground/benchmarks/libero/libero_dm05.py) 和 [libero_dm05_lora.py](playground/benchmarks/libero/libero_dm05_lora.py)。
 - **[2026-08-06]** 新增 [CogACT LIBERO LoRA SFT](docs/LiberoLora.md#cogact-lora-recipe) 支持，详见 [CogACT LoRA](playground/benchmarks/libero/libero_cogact_lora.py)。
 - **[2026-08-06]** 新增 [DM0 LIBERO LoRA SFT](docs/LiberoLora.md#dm0-lora-recipe) 支持，详见 [DM0 LoRA](playground/benchmarks/libero/libero_dm0_lora.py)。
 - **[2026-07-29]** 新增 [PI05 LIBERO LoRA SFT](docs/LiberoLora.md#pi05-lora-recipe) 支持，详见 [PI05 LoRA](playground/benchmarks/libero/libero_pi05_lora.py)。
