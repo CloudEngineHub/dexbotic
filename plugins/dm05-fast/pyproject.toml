@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dexbotic-dm05-fast"
+version = "0.1.0"
+description = "Installable activation plugin for the Dexbotic DM05 fast backend"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "dexbotic>=0.2.0,<0.3.0",
+    "onnx==1.21.0",
+    "onnxscript==0.7.2",
+    "tensorrt-cu12==10.8.0.43",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

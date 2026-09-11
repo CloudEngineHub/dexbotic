@@ -23,7 +23,9 @@ dependencies = [
     # Core ML/AI dependencies
     "transformers>=4.57.6",
     "accelerate>=1.10.0",
-    "kernels",
+    # transformers 5.3 instantiates repositories without revision/version;
+    # kernels >=0.15 rejects that constructor form during import.
+    "kernels<0.15",
     "deepspeed==0.19.1",
     "peft",
     "bitsandbytes",
@@ -98,8 +100,9 @@ attention = [
     "xformers"
 ]
 
-[tool.setuptools]
-packages = ["dexbotic"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["dexbotic*"]
 
 [tool.autopep8]
 max_line_length = 88

@@ -9,64 +9,69 @@ import time
 import uuid
 from dataclasses import dataclass, field, fields
 from datetime import datetime
-from flask import Flask, jsonify, request
-import torch
-from PIL import Image
 from io import BytesIO
-from typing import Callable, Dict, List, Optional, Union
+from typing import Callable, Dict, Optional, Union
 
 import megfile
 import numpy as np
+import torch
 import tqdm
 import transformers
 from easydict import EasyDict
+from flask import Flask, jsonify, request
 from loguru import logger
+from PIL import Image
 from torch.utils.data import DataLoader
-from transformers import AutoImageProcessor, BaseImageProcessor, AutoTokenizer
-from transformers.trainer_utils import get_last_checkpoint
+from transformers import AutoImageProcessor, AutoTokenizer, BaseImageProcessor
 from transformers.trainer_pt_utils import get_parameter_names
+from transformers.trainer_utils import get_last_checkpoint
+
 try:
     from transformers.trainer import ALL_LAYERNORM_LAYERS
 except ImportError:
     from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
 
-from dexbotic.constants import DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX
 import dexbotic.data.utils.normalize as normalize
+from dexbotic.constants import DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX
 from dexbotic.data.collator import DataCollatorForSupervisedDataset
 from dexbotic.data.dataset.dex_dataset import DexDataset
 from dexbotic.data.dataset.rgb_preprocess import DummyRGBProcessor
 from dexbotic.data.dataset.tokenization import DummyTokenization
-from dexbotic.data.dataset.transform.action import (ActionNormAnd2String,
-                                                    AddAction, AddTrajectory,
-                                                    DeltaAction)
-from dexbotic.data.dataset.transform.common import (Pipeline, ToDict, ToList,
-                                                    ToNumpy)
-from dexbotic.data.dataset.transform.language import (AddPromptTemplate,
-                                                      ReplaceAnswer,
-                                                      defalut_prompt_template)
+from dexbotic.data.dataset.transform.action import (
+    ActionNormAnd2String,
+    AddAction,
+    AddTrajectory,
+    DeltaAction,
+)
+from dexbotic.data.dataset.transform.common import Pipeline, ToDict, ToList, ToNumpy
+from dexbotic.data.dataset.transform.language import (
+    AddPromptTemplate,
+    ReplaceAnswer,
+    defalut_prompt_template,
+)
 from dexbotic.data.dataset.transform.multimodal import LoadMultiModal
 from dexbotic.exp.backend_resolver import (
+    BackendResolution,
     FSDPProfile,
     apply_backend_defaults,
-    BackendResolution,
     resolve_backend_mode,
 )
-from dexbotic.exp.trainer import (DexboticTrainer,
-                                  safe_save_model_for_hf_trainer)
+from dexbotic.exp.trainer import DexboticTrainer, safe_save_model_for_hf_trainer
 from dexbotic.exp.utils import NumpyEncoder, enter_debug_mode
-from dexbotic.model.dexbotic_arch import (DexboticConfig, DexboticForCausalLM,
-                                          DexboticVLMModel)
-from dexbotic.tokenization.process import LLMTokenization
+from dexbotic.model.dexbotic_arch import (
+    DexboticConfig,
+    DexboticForCausalLM,
+    DexboticVLMModel,
+)
+from dexbotic.policy.types import GenSamplingConfig, SamplingConfig
 from dexbotic.tokenization import conversation as conversation_lib
 from dexbotic.tokenization.conversation import KeywordsStoppingCriteria
+from dexbotic.tokenization.process import LLMTokenization
 from dexbotic.tokenization.tokenization import tokenizer_image_token
-from dexbotic.policy.types import GenSamplingConfig, SamplingConfig
-
-
 
 OPENAI_CLIP_PATH = os.environ.get(
-    'OPENAI_CLIP_PATH',
-    'openai/clip-vit-large-patch14-336')
+    "OPENAI_CLIP_PATH", "openai/clip-vit-large-patch14-336"
+)
 
 
 @dataclass
@@ -105,10 +110,9 @@ class OptimizerConfig(Config):
     mm_vision_lr: Optional[float] = field(default=None)
     action_head_lr: Optional[float] = field(default=None)
 
-    def _get_optimizer_grouped_parameters(
-            self, model: DexboticVLMModel) -> list:
+    def _get_optimizer_grouped_parameters(self, model: DexboticVLMModel) -> list:
         """Returns a list of dictionaries containing parameters grouped by their names
-           and whether they require weight decay.
+        and whether they require weight decay.
         """
 
         decay_params_name = get_parameter_names(model, ALL_LAYERNORM_LAYERS)
@@ -124,23 +128,37 @@ class OptimizerConfig(Config):
         if self.mm_projector_lr is not None:
             logger.info("Using mm_projector_lr: {}", self.mm_projector_lr)
             mm_projector_params_name = [
-                name for name,
-                _ in model.named_parameters() if model.mm_projector_prefix in name]
+                name
+                for name, _ in model.named_parameters()
+                if model.mm_projector_prefix in name
+            ]
 
             mm_projector_decay_params = {
                 "params": [
-                    p for n,
-                    p in model.named_parameters() if (
-                        p.requires_grad and n in decay_params_name and n in mm_projector_params_name)],
+                    p
+                    for n, p in model.named_parameters()
+                    if (
+                        p.requires_grad
+                        and n in decay_params_name
+                        and n in mm_projector_params_name
+                    )
+                ],
                 "weight_decay": self.weight_decay,
-                "lr": self.mm_projector_lr}
+                "lr": self.mm_projector_lr,
+            }
             mm_projector_no_decay_params = {
                 "params": [
-                    p for n,
-                    p in model.named_parameters() if (
-                        p.requires_grad and n not in decay_params_name and n in mm_projector_params_name)],
+                    p
+                    for n, p in model.named_parameters()
+                    if (
+                        p.requires_grad
+                        and n not in decay_params_name
+                        and n in mm_projector_params_name
+                    )
+                ],
                 "weight_decay": 0.0,
-                "lr": self.mm_projector_lr}
+                "lr": self.mm_projector_lr,
+            }
 
             optimizer_grouped_parameters.append(mm_projector_decay_params)
             optimizer_grouped_parameters.append(mm_projector_no_decay_params)
@@ -148,67 +166,107 @@ class OptimizerConfig(Config):
         if self.mm_vision_lr is not None:
             logger.info("Using mm_vision_lr: {}", self.mm_vision_lr)
             mm_vision_params_name = [
-                name for name,
-                _ in model.named_parameters() if model.mm_vision_prefix in name]
+                name
+                for name, _ in model.named_parameters()
+                if model.mm_vision_prefix in name
+            ]
 
             mm_vision_decay_params = {
                 "params": [
-                    p for n,
-                    p in model.named_parameters() if (
-                        p.requires_grad and n in decay_params_name and n in mm_vision_params_name)],
+                    p
+                    for n, p in model.named_parameters()
+                    if (
+                        p.requires_grad
+                        and n in decay_params_name
+                        and n in mm_vision_params_name
+                    )
+                ],
                 "weight_decay": self.weight_decay,
-                "lr": self.mm_vision_lr}
+                "lr": self.mm_vision_lr,
+            }
             mm_vision_no_decay_params = {
                 "params": [
-                    p for n,
-                    p in model.named_parameters() if (
-                        p.requires_grad and n not in decay_params_name and n in mm_vision_params_name)],
+                    p
+                    for n, p in model.named_parameters()
+                    if (
+                        p.requires_grad
+                        and n not in decay_params_name
+                        and n in mm_vision_params_name
+                    )
+                ],
                 "weight_decay": 0.0,
-                "lr": self.mm_vision_lr}
+                "lr": self.mm_vision_lr,
+            }
             optimizer_grouped_parameters.append(mm_vision_decay_params)
             optimizer_grouped_parameters.append(mm_vision_no_decay_params)
 
         if self.action_head_lr is not None:
             logger.info("Using action_head_lr: {}", self.action_head_lr)
             action_head_params_name = [
-                name for name,
-                _ in model.named_parameters() if model.action_head_prefix in name]
+                name
+                for name, _ in model.named_parameters()
+                if model.action_head_prefix in name
+            ]
 
             action_head_decay_params = {
                 "params": [
-                    p for n,
-                    p in model.named_parameters() if (
-                        p.requires_grad and n in decay_params_name and n in action_head_params_name)],
+                    p
+                    for n, p in model.named_parameters()
+                    if (
+                        p.requires_grad
+                        and n in decay_params_name
+                        and n in action_head_params_name
+                    )
+                ],
                 "weight_decay": self.weight_decay,
-                "lr": self.action_head_lr}
+                "lr": self.action_head_lr,
+            }
             action_head_no_decay_params = {
                 "params": [
-                    p for n,
-                    p in model.named_parameters() if (
-                        p.requires_grad and n not in decay_params_name and n in action_head_params_name)],
+                    p
+                    for n, p in model.named_parameters()
+                    if (
+                        p.requires_grad
+                        and n not in decay_params_name
+                        and n in action_head_params_name
+                    )
+                ],
                 "weight_decay": 0.0,
-                "lr": self.action_head_lr}
+                "lr": self.action_head_lr,
+            }
             optimizer_grouped_parameters.append(action_head_decay_params)
             optimizer_grouped_parameters.append(action_head_no_decay_params)
 
         base_decay_params = {
             "params": [
-                p for n, p in model.named_parameters() if
-                (p.requires_grad and n in decay_params_name and n not in mm_projector_params_name and
-                 n not in mm_vision_params_name and n not in action_head_params_name)
+                p
+                for n, p in model.named_parameters()
+                if (
+                    p.requires_grad
+                    and n in decay_params_name
+                    and n not in mm_projector_params_name
+                    and n not in mm_vision_params_name
+                    and n not in action_head_params_name
+                )
             ],
             "weight_decay": self.weight_decay,
-            "lr": self.base_lr
+            "lr": self.base_lr,
         }
 
         base_no_decay_params = {
             "params": [
-                p for n, p in model.named_parameters() if
-                (p.requires_grad and n not in decay_params_name and n not in mm_projector_params_name and
-                 n not in mm_vision_params_name and n not in action_head_params_name)
+                p
+                for n, p in model.named_parameters()
+                if (
+                    p.requires_grad
+                    and n not in decay_params_name
+                    and n not in mm_projector_params_name
+                    and n not in mm_vision_params_name
+                    and n not in action_head_params_name
+                )
             ],
             "weight_decay": 0.0,
-            "lr": self.base_lr
+            "lr": self.base_lr,
         }
         optimizer_grouped_parameters.append(base_decay_params)
         optimizer_grouped_parameters.append(base_no_decay_params)
@@ -239,8 +297,8 @@ class TrainerConfig(Config):
     - tune_mm_mlp_adapter: Whether to enter mm_mlp_adapter-only training mode
     """
 
-    train_backend: str = field(default='deepspeed')
-    deepspeed: Optional[str] = field(default='./script/deepspeed/zero2.json')
+    train_backend: str = field(default="deepspeed")
+    deepspeed: Optional[str] = field(default="./script/deepspeed/zero2.json")
     fsdp: Optional[str] = field(default=None)
     fsdp_config: Optional[dict] = field(default=None)
     fsdp_version: Optional[int] = field(default=None)
@@ -252,13 +310,13 @@ class TrainerConfig(Config):
     per_device_train_batch_size: int = field(default=8)
     gradient_accumulation_steps: int = field(default=2)
 
-    save_strategy: str = field(default='steps')
+    save_strategy: str = field(default="steps")
     save_steps: int = field(default=20000)
     save_total_limit: int = field(default=1)
     save_only_model: bool = field(default=True)
 
     logging_steps: int = field(default=10)
-    wandb_project: str = field(default='dexbotic')
+    wandb_project: str = field(default="dexbotic")
 
     gradient_checkpointing: bool = field(default=True)
 
@@ -271,7 +329,7 @@ class TrainerConfig(Config):
     bf16: bool = field(default=True)
     tf32: bool = field(default=True)
 
-    lr_scheduler_type: str = field(default='cosine')
+    lr_scheduler_type: str = field(default="cosine")
     lr_scheduler_kwargs: dict = field(default_factory=dict)
 
     tune_mm_mlp_adapter: bool = field(default=False)
@@ -281,10 +339,10 @@ class TrainerConfig(Config):
         apply_backend_defaults(self)
 
     def __post_init__(self):
-        if self.train_backend not in {'deepspeed', 'fsdp', 'fsdp2', 'ddp'}:
+        if self.train_backend not in {"deepspeed", "fsdp", "fsdp2", "ddp"}:
             raise ValueError(
-                f'Unsupported train_backend: {self.train_backend}. '
-                'Expected one of: deepspeed, fsdp, fsdp2, ddp.'
+                f"Unsupported train_backend: {self.train_backend}. "
+                "Expected one of: deepspeed, fsdp, fsdp2, ddp."
             )
         if self.output_dir is not None:
             self.run_name = os.path.basename(self.output_dir)
@@ -307,18 +365,16 @@ class ModelConfig(Config):
     """
 
     model_name_or_path: str = field(default=None)
-    chat_template: str = field(default='dexbotic')
+    chat_template: str = field(default="dexbotic")
 
-    mm_projector_type: str = field(default='mlp2x_gelu')
-    mm_vision_tower: str = field(
-        default=OPENAI_CLIP_PATH)
+    mm_projector_type: str = field(default="mlp2x_gelu")
+    mm_vision_tower: str = field(default=OPENAI_CLIP_PATH)
     from_llm: bool = field(default=False)
     freeze_llm: bool = field(default=False)
     freeze_mm_projector: bool = field(default=False)
     freeze_mm_vision: bool = field(default=False)
 
     def build_model(self) -> DexboticForCausalLM:
-
         if self.from_llm:
             model_config_args = {
                 "llm_config": self.model_name_or_path,
@@ -371,20 +427,23 @@ class TokenizerConfig(Config):
     use_special_tokens: bool = field(default=False)
     use_fast_tokenizer: bool = field(default=True)
 
-    def build_tokenizer(self, model_name_or_path: str, **
-                        kwargs) -> transformers.PreTrainedTokenizer:
+    def build_tokenizer(
+        self, model_name_or_path: str, **kwargs
+    ) -> transformers.PreTrainedTokenizer:
         tokenizer = transformers.AutoTokenizer.from_pretrained(
-            model_name_or_path, **kwargs)
+            model_name_or_path, **kwargs
+        )
         if tokenizer.unk_token is not None and tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.unk_token
         return tokenizer
 
-    def add_special_tokens(self,
-                           special_token_format: str,
-                           vocab_size: int,
-                           tokenizer: transformers.PreTrainedTokenizer,
-                           model: transformers.PreTrainedModel
-                           ) -> transformers.PreTrainedTokenizer:
+    def add_special_tokens(
+        self,
+        special_token_format: str,
+        vocab_size: int,
+        tokenizer: transformers.PreTrainedTokenizer,
+        model: transformers.PreTrainedModel,
+    ) -> transformers.PreTrainedTokenizer:
         if not self.use_special_tokens:
             return tokenizer
 
@@ -412,42 +471,50 @@ class ActionConfig(Config):
     """
 
     statistic_mapping: str = field(default=None)
-    replace_with_default_answer: str = field(default=' ')
+    replace_with_default_answer: str = field(default=" ")
     trajectory_length: int = field(default=16)
     delta: bool = field(default=True)
-    trajectory_padding_model: str = field(default='zero')
+    trajectory_padding_model: str = field(default="zero")
     padding_action: bool = field(default=False)
     vocab_size: int = field(default=255)
-    string_format: str = field(default=' {value}')
-    prompt_template: Union[str, Callable[[str], str]
-                           ] = field(default=defalut_prompt_template)
+    string_format: str = field(default=" {value}")
+    prompt_template: Union[str, Callable[[str], str]] = field(
+        default=defalut_prompt_template
+    )
 
     def build_action_process_func(self) -> Pipeline:
         statistic_mapping = self._read_norm_stats(self.statistic_mapping)
-        action_config = Pipeline([
-            ToDict(),
-            ToNumpy(),
-            AddAction(predict_length=1),
-            DeltaAction(enable=self.delta),
-            AddTrajectory(trajectory_length=self.trajectory_length,
-                          padding_mode=self.trajectory_padding_model,
-                          padding_action=self.padding_action),
-            ActionNormAnd2String(statistic_mapping=statistic_mapping,
-                                 vocab_size=self.vocab_size,
-                                 string_format=self.string_format),
-            LoadMultiModal(),
-            AddPromptTemplate(prompt_template=self.prompt_template),
-            ReplaceAnswer(default_answer=self.replace_with_default_answer),
-            ToList(),
-        ])
+        action_config = Pipeline(
+            [
+                ToDict(),
+                ToNumpy(),
+                AddAction(predict_length=1),
+                DeltaAction(enable=self.delta),
+                AddTrajectory(
+                    trajectory_length=self.trajectory_length,
+                    padding_mode=self.trajectory_padding_model,
+                    padding_action=self.padding_action,
+                ),
+                ActionNormAnd2String(
+                    statistic_mapping=statistic_mapping,
+                    vocab_size=self.vocab_size,
+                    string_format=self.string_format,
+                ),
+                LoadMultiModal(),
+                AddPromptTemplate(prompt_template=self.prompt_template),
+                ReplaceAnswer(default_answer=self.replace_with_default_answer),
+                ToList(),
+            ]
+        )
 
         return action_config
 
     def _read_norm_stats(self, norm_stats_path):
         assert megfile.smart_exists(
-            norm_stats_path), f'Norm stats file {norm_stats_path} not found'
-        with megfile.smart_open(norm_stats_path, 'r') as f:
-            norm_stats = json.load(f)['norm_stats']
+            norm_stats_path
+        ), f"Norm stats file {norm_stats_path} not found"
+        with megfile.smart_open(norm_stats_path, "r") as f:
+            norm_stats = json.load(f)["norm_stats"]
             norm_stats = ToNumpy()(norm_stats)
         return norm_stats
 
@@ -457,34 +524,38 @@ class ComputeNormActionConfig(ActionConfig):
     """
     Configuration class for computing action normalization parameters
     """
-    norm_method: str = field(default='default')
-    
+
+    norm_method: str = field(default="default")
+
     norm_save_path: str = field(
         default=os.path.join(
-            os.path.dirname(
-                os.path.dirname(__file__)),
-            'norm_assets',
-            f'{datetime.now().strftime("%m%d-%H%M")}-default'))
+            os.path.dirname(os.path.dirname(__file__)),
+            "norm_assets",
+            f'{datetime.now().strftime("%m%d-%H%M")}-default',
+        )
+    )
 
     def build_action_process_func(self) -> Pipeline:
-        action_config = Pipeline([
-            ToDict(),
-            ToNumpy(),
-            AddAction(predict_length=1),
-            DeltaAction(enable=self.delta),
-            ToList(),
-        ])
+        action_config = Pipeline(
+            [
+                ToDict(),
+                ToNumpy(),
+                AddAction(predict_length=1),
+                DeltaAction(enable=self.delta),
+                ToList(),
+            ]
+        )
 
         return action_config
 
     def compute_norm_stats(self, dataset_name: str) -> None:
-        dataset_name_list = dataset_name.split('+')
+        dataset_name_list = dataset_name.split("+")
         action_process_func = self.build_action_process_func()
         dataset_list = self._get_dataset(action_process_func, dataset_name_list)
         norm_files = {}
 
         for dataset_name, dataset in dataset_list:
-            if dataset_name.startswith('general'):
+            if dataset_name.startswith("general"):
                 continue
             norm_file = self._process_one_dataset(dataset_name, dataset)
             norm_files[dataset_name] = (norm_file, dataset.dataset_map[0])
@@ -498,23 +569,28 @@ class ComputeNormActionConfig(ActionConfig):
                 data_args=EasyDict(
                     dataset_name=dataset_name,
                     num_images=1,
-                    data_keys=['action'],
-                    image_processor=AutoImageProcessor.from_pretrained(OPENAI_CLIP_PATH),
+                    data_keys=["action"],
+                    image_processor=AutoImageProcessor.from_pretrained(
+                        OPENAI_CLIP_PATH
+                    ),
                     image_aspect_ratio=None,
-                    aug_policy=None),
+                    aug_policy=None,
+                ),
                 tokenization_func=DummyTokenization(),
                 action_process_func=action_process_func,
-                image_process_func=DummyRGBProcessor())
+                image_process_func=DummyRGBProcessor(),
+            )
             robot_dataset_list.append((dataset_name, robot_dataset))
         return robot_dataset_list
 
     def _process_one_dataset(self, dataset_name, dataset):
         dataloader = DataLoader(dataset, batch_size=128, shuffle=True, num_workers=64)
 
-        norm_keys = ['action']
+        norm_keys = ["action"]
         stats = {key: normalize.RunningStats() for key in norm_keys}
         for batch_idx, batch in tqdm.tqdm(
-                enumerate(dataloader), desc='Computing norm stats'):
+            enumerate(dataloader), desc="Computing norm stats"
+        ):
             # only use the first 500 * 128 samples
             if batch_idx > 500:
                 break
@@ -524,52 +600,55 @@ class ComputeNormActionConfig(ActionConfig):
         norm_stats = {key: stats.get_statistics() for key, stats in stats.items()}
 
         save_path = os.path.join(self.norm_save_path, dataset_name)
-        logger.info(f'Saving norm stats to {save_path}')
+        logger.info(f"Saving norm stats to {save_path}")
         normalize.save(save_path, norm_stats)
 
-        return os.path.join(save_path, 'norm_stats.json')
+        return os.path.join(save_path, "norm_stats.json")
 
     def _merge_norm_stats(self, norm_files, per_task_norm=False):
         norm_stats = {
-            'default': {'min': -1, 'max': 1},
+            "default": {"min": -1, "max": 1},
         }
         min_list = []
         max_list = []
         for dataset_name, (norm_file, dataset_path) in norm_files.items():
-            with open(norm_file, 'r') as f:
-                stats = json.load(f)['norm_stats']['action']
+            with open(norm_file, "r") as f:
+                stats = json.load(f)["norm_stats"]["action"]
             if per_task_norm:
-                if self.norm_method == 'default':
-                    
-                    norm_stats[dataset_path] = {'default': {
-                        'min': stats['q01'],
-                        'max': stats['q99'],
-                    }}
+                if self.norm_method == "default":
+                    norm_stats[dataset_path] = {
+                        "default": {
+                            "min": stats["q01"],
+                            "max": stats["q99"],
+                        }
+                    }
                 else:
-                    norm_stats[dataset_path] = {'default': {
-                        'min': stats['min'],
-                        'max': stats['max'],
-                    }}
-            if self.norm_method == 'default':
-                min_list.append(stats['q01'])
-                max_list.append(stats['q99'])
+                    norm_stats[dataset_path] = {
+                        "default": {
+                            "min": stats["min"],
+                            "max": stats["max"],
+                        }
+                    }
+            if self.norm_method == "default":
+                min_list.append(stats["q01"])
+                max_list.append(stats["q99"])
             else:
-                min_list.append(stats['min'])
-                max_list.append(stats['max'])
+                min_list.append(stats["min"])
+                max_list.append(stats["max"])
 
         min_list = np.array(min_list).min(axis=0).tolist()
         max_list = np.array(max_list).max(axis=0).tolist()
-        norm_stats['default'] = {
-            'min': min_list,
-            'max': max_list,
+        norm_stats["default"] = {
+            "min": min_list,
+            "max": max_list,
         }
 
-        with open(os.path.join(self.norm_save_path, 'norm_stats.json'), 'w') as f:
-            json.dump({'norm_stats': norm_stats}, f, indent=2)
-            
+        with open(os.path.join(self.norm_save_path, "norm_stats.json"), "w") as f:
+            json.dump({"norm_stats": norm_stats}, f, indent=2)
+
     def __post_init__(self):
-        if self.norm_method not in ['default', 'minmax']:
-            raise ValueError(f'Invalid norm method: {self.norm_method}')
+        if self.norm_method not in ["default", "minmax"]:
+            raise ValueError(f"Invalid norm method: {self.norm_method}")
 
 
 @dataclass
@@ -592,54 +671,57 @@ class DataConfig(Config):
     dataset_name: str = field(default=None)
     num_images: int = field(default=1)
     data_keys: list[str] = field(
-        default_factory=lambda: [
-            'input_ids',
-            'labels',
-            'action',
-            'image'])
+        default_factory=lambda: ["input_ids", "labels", "action", "image"]
+    )
     images_keys: list[str] = field(default=None)
-    aug_policy: str | list[str] = field(default='v3')
-    image_aspect_ratio: str = field(default='pad')
+    aug_policy: str | list[str] = field(default="v3")
+    image_aspect_ratio: str = field(default="pad")
     action_config: ActionConfig = field(default_factory=ActionConfig)
     auto_norm: bool = field(default=True)
-    auto_norm_method: str = field(default='default')
-    image_pad_mode: str = field(default='mean')
+    auto_norm_method: str = field(default="default")
+    image_pad_mode: str = field(default="mean")
 
-    def build_data(self,
-                   tokenizer: transformers.PreTrainedTokenizer,
-                   chat_template: str,
-                   image_processor: BaseImageProcessor) -> Dict:
+    def build_data(
+        self,
+        tokenizer: transformers.PreTrainedTokenizer,
+        chat_template: str,
+        image_processor: BaseImageProcessor,
+    ) -> Dict:
         dataset = self._build_dataset(tokenizer, chat_template, image_processor)
         data_collator = self._build_data_collator(tokenizer)
         return dataset, data_collator
 
-    def _build_dataset(self,
-                       tokenizer: transformers.PreTrainedTokenizer,
-                       chat_template: str,
-                       image_processor: BaseImageProcessor) -> DexDataset:
+    def _build_dataset(
+        self,
+        tokenizer: transformers.PreTrainedTokenizer,
+        chat_template: str,
+        image_processor: BaseImageProcessor,
+    ) -> DexDataset:
         # FIXME: DO NOT USE EASYDICT IN NEXT VERSION
-        data_args = EasyDict({
-            "dataset_name": self.dataset_name,
-            "num_images": self.num_images,
-            "data_keys": self.data_keys,
-            "images_keys": self.images_keys,
-            "aug_policy": self.aug_policy,
-            "image_aspect_ratio": self.image_aspect_ratio,
-            "image_processor": image_processor,
-            "chat_template": chat_template,
-        })
+        data_args = EasyDict(
+            {
+                "dataset_name": self.dataset_name,
+                "num_images": self.num_images,
+                "data_keys": self.data_keys,
+                "images_keys": self.images_keys,
+                "aug_policy": self.aug_policy,
+                "image_aspect_ratio": self.image_aspect_ratio,
+                "image_processor": image_processor,
+                "chat_template": chat_template,
+            }
+        )
         action_process_func = self.action_config.build_action_process_func()
         tokenization_func = LLMTokenization(tokenizer, data_args)
         dataset = DexDataset(
             data_args=data_args,
             tokenization_func=tokenization_func,
-            action_process_func=action_process_func
+            action_process_func=action_process_func,
         )
         return dataset
 
     def _build_data_collator(
-            self,
-            tokenizer: transformers.PreTrainedTokenizer) -> DataCollatorForSupervisedDataset:
+        self, tokenizer: transformers.PreTrainedTokenizer
+    ) -> DataCollatorForSupervisedDataset:
         return DataCollatorForSupervisedDataset(tokenizer)
 
 
@@ -659,7 +741,7 @@ class InferenceConfig(Config):
     model_name_or_path: Optional[str] = field(default=None)
     port: int = field(default=7891)
     save_image: bool = field(default=False)
-    save_image_dir: str = field(default='./debug_data')
+    save_image_dir: str = field(default="./debug_data")
     norm_stats: Optional[dict] = field(default=None)
     camera_order: list = field(default_factory=lambda: ["front"])
 
@@ -674,87 +756,108 @@ class InferenceConfig(Config):
             torch.cuda.manual_seed_all(seed)
 
     def process_frame(self) -> None:
-        self._apply_inference_seed(request.form.get('seed'))
-        text = request.form.get("text", "")
-        images = request.files.getlist("image")
-        response_images = images if images else None
+        self._apply_inference_seed(request.form.get("seed"))
         results = self._get_response(
-            text=request.form.get('text'),
-            images=request.files.getlist('image'),
+            text=request.form.get("text"),
+            images=request.files.getlist("image"),
         )
-        return jsonify({'response': results})
+        return jsonify({"response": results})
 
     def run(self) -> None:
         self._initialize_inference()
         self.app = Flask(__name__)
         # legacy route — kept for backward compatibility
-        self.app.add_url_rule('/process_frame', 'process_frame', self.process_frame, methods=['POST'])
+        self.app.add_url_rule(
+            "/process_frame", "process_frame", self.process_frame, methods=["POST"]
+        )
         # v1 routes
-        self.app.add_url_rule('/health', 'health', self._v1_health, methods=['GET'])
-        self.app.add_url_rule('/v1/models', 'v1_models', self._v1_models, methods=['GET'])
-        self.app.add_url_rule('/v1/capabilities', 'v1_capabilities', self._v1_capabilities, methods=['GET'])
-        self.app.add_url_rule('/v1/infer', 'v1_infer', self._v1_infer, methods=['POST'])
-        self.app.add_url_rule('/v1/reset', 'v1_reset', self._v1_reset, methods=['POST'])
-        self.app.add_url_rule('/v1/chat/completions', 'v1_chat', self._v1_chat, methods=['POST'])
-        self.app.run(host='0.0.0.0', port=self.port, debug=False, threaded=False)
+        self.app.add_url_rule("/health", "health", self._v1_health, methods=["GET"])
+        self.app.add_url_rule(
+            "/v1/models", "v1_models", self._v1_models, methods=["GET"]
+        )
+        self.app.add_url_rule(
+            "/v1/capabilities",
+            "v1_capabilities",
+            self._v1_capabilities,
+            methods=["GET"],
+        )
+        self.app.add_url_rule("/v1/infer", "v1_infer", self._v1_infer, methods=["POST"])
+        self.app.add_url_rule("/v1/reset", "v1_reset", self._v1_reset, methods=["POST"])
+        self.app.add_url_rule(
+            "/v1/chat/completions", "v1_chat", self._v1_chat, methods=["POST"]
+        )
+        self.app.run(host="0.0.0.0", port=self.port, debug=False, threaded=False)
 
     def _load_model(self) -> None:
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         logger.info(f"Loading model from {self.model_name_or_path}")
         logger.info(f"Using device: {self.device}")
-        model = DexboticForCausalLM.from_pretrained(self.model_name_or_path,
-                                                  torch_dtype=torch.bfloat16,
-                                                  low_cpu_mem_usage=True,
-                                                  trust_remote_code=True,
-                                                  device_map={"": "cuda:0"}).to(self.device)
+        model = DexboticForCausalLM.from_pretrained(
+            self.model_name_or_path,
+            torch_dtype=torch.bfloat16,
+            low_cpu_mem_usage=True,
+            trust_remote_code=True,
+            device_map={"": "cuda:0"},
+        ).to(self.device)
         tokenizer = AutoTokenizer.from_pretrained(self.model_name_or_path)
         self.model = model
         self.tokenizer = tokenizer
         self.model_config = model.config
-        logger.info(f"Model loaded successfully")
+        logger.info("Model loaded successfully")
 
     def _get_response(self, text: str, images: list[str]) -> str:
         t0 = time.monotonic()
         if len(images) == 1:
-            images = [Image.open(images[0]).convert('RGB')]
+            images = [Image.open(images[0]).convert("RGB")]
             image_tensor = self.model.process_images(images).to(dtype=self.model.dtype)
         else:
-            images = [Image.open(image).convert('RGB') for image in images]
-            image_tensor = self.model.process_images(
-                images).to(dtype=self.model.dtype).unsqueeze(0)
+            images = [Image.open(image).convert("RGB") for image in images]
+            image_tensor = (
+                self.model.process_images(images)
+                .to(dtype=self.model.dtype)
+                .unsqueeze(0)
+            )
 
         self._save_image(images, text)
 
         conv = conversation_lib.conv_templates[self.model_config.chat_template].copy()
-        conv.append_message(conv.roles[0], DEFAULT_IMAGE_TOKEN + '\n' + text)
+        conv.append_message(conv.roles[0], DEFAULT_IMAGE_TOKEN + "\n" + text)
         conv.append_message(conv.roles[1], None)
         prompt = conv.get_prompt()
 
-        input_ids = tokenizer_image_token(
-            prompt,
-            self.tokenizer,
-            IMAGE_TOKEN_INDEX,
-            return_tensors='pt').unsqueeze(0).to(
-            self.model.device)
-        stop_str = conv.sep if conv.sep_style != conversation_lib.SeparatorStyle.TWO else conv.sep2
+        input_ids = (
+            tokenizer_image_token(
+                prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt"
+            )
+            .unsqueeze(0)
+            .to(self.model.device)
+        )
+        stop_str = (
+            conv.sep
+            if conv.sep_style != conversation_lib.SeparatorStyle.TWO
+            else conv.sep2
+        )
         keywords = [stop_str]
-        stopping_criteria = KeywordsStoppingCriteria(keywords, self.tokenizer, input_ids)
+        stopping_criteria = KeywordsStoppingCriteria(
+            keywords, self.tokenizer, input_ids
+        )
 
-
-        logger.debug(f'input_ids: {input_ids}')
+        logger.debug(f"input_ids: {input_ids}")
         with torch.inference_mode():
-            outputs = self.model.generate(input_ids,
-                                        images=image_tensor,
-                                        max_new_tokens=1024,
-                                        do_sample=True,
-                                        temperature=0.7,
-                                        return_dict_in_generate=True,
-                                        stopping_criteria=[stopping_criteria])
-            outputs = outputs.sequences[0, input_ids.shape[1]:]
+            outputs = self.model.generate(
+                input_ids,
+                images=image_tensor,
+                max_new_tokens=1024,
+                do_sample=True,
+                temperature=0.7,
+                return_dict_in_generate=True,
+                stopping_criteria=[stopping_criteria],
+            )
+            outputs = outputs.sequences[0, input_ids.shape[1] :]
             outputs = self.tokenizer.decode(outputs, skip_special_tokens=False)
             outputs = outputs.strip(stop_str)
 
-        logger.info(f'prompt: <start>{prompt}<end>\noutput: {outputs}')
+        logger.info(f"prompt: <start>{prompt}<end>\noutput: {outputs}")
         logger.info(f"Processing time: {time.monotonic() - t0}")
         return outputs
 
@@ -772,12 +875,11 @@ class InferenceConfig(Config):
         # save image
         for idx, image in enumerate(images):
             image.save(
-                os.path.join(
-                    save_image_dir_episode,
-                    f'{self.timestep}_{idx}.png'))
+                os.path.join(save_image_dir_episode, f"{self.timestep}_{idx}.png")
+            )
         # save text
         if self.timestep == 0:
-            with open(os.path.join(save_image_dir_episode, 'text.txt'), 'w') as f:
+            with open(os.path.join(save_image_dir_episode, "text.txt"), "w") as f:
                 f.write(text)
 
     def _build_policy(self):
@@ -791,7 +893,7 @@ class InferenceConfig(Config):
         self.episode = 0
 
         if self.norm_stats is None:
-            norm_stats_file = os.path.join(self.model_name_or_path, 'norm_stats.json')
+            norm_stats_file = os.path.join(self.model_name_or_path, "norm_stats.json")
             self.norm_stats = self.read_normalization_stats(norm_stats_file)
         elif isinstance(self.norm_stats, str):
             self.norm_stats = self.read_normalization_stats(self.norm_stats)
@@ -802,12 +904,12 @@ class InferenceConfig(Config):
     def read_normalization_stats(self, action_norm_file):
         logger.info(f"Reading normalization stats from {action_norm_file}")
         if action_norm_file is None or not megfile.smart_exists(action_norm_file):
-            return {'min': -1, 'max': 1}
-        with megfile.smart_open(action_norm_file, 'r') as f:
+            return {"min": -1, "max": 1}
+        with megfile.smart_open(action_norm_file, "r") as f:
             norm_stats = json.load(f)
-            if 'norm_stats' in norm_stats:
-                norm_stats = norm_stats['norm_stats']
-            norm_stats = norm_stats['default']
+            if "norm_stats" in norm_stats:
+                norm_stats = norm_stats["norm_stats"]
+            norm_stats = norm_stats["default"]
         return norm_stats
 
     # ── v1 route handlers ────────────────────────────────────────────────────
@@ -817,10 +919,12 @@ class InferenceConfig(Config):
 
     def _v1_models(self):
         model_id = os.path.basename(self.model_name_or_path or "unknown")
-        return jsonify({
-            "object": "list",
-            "data": [{"id": model_id, "object": "model"}],
-        })
+        return jsonify(
+            {
+                "object": "list",
+                "data": [{"id": model_id, "object": "model"}],
+            }
+        )
 
     def _v1_capabilities(self):
         # camera_order has len == num_images; None entries are always zero-padded.
@@ -832,37 +936,45 @@ class InferenceConfig(Config):
             else {}
         )
         state_caps = policy_caps.get("state", {})
+        history_caps = policy_caps.get("history", {})
         slots = [
             {"slot": i + 1, "name": name, "required": name is not None}
             for i, name in enumerate(self.camera_order)
         ]
-        return jsonify({
-            "model_family": self.__class__.__name__,
-            "vla": policy_caps.get("vla", getattr(self, "policy", None) is not None),
-            "vlm": policy_caps.get("vlm", False),
-            "modalities": {
-                "images": {
-                    "slots": slots,
-                    "format": "image/{slot_index}",
+        modalities = {
+            "images": {
+                "slots": slots,
+                "format": "image/{slot_index}",
+            },
+            "state": {
+                "used": state_caps.get("used", False),
+                "required": state_caps.get("required", False),
+                "dim": state_caps.get("dim", None),
+            },
+            "prompt": {"required": True},
+        }
+        if history_caps:
+            modalities["history_images"] = history_caps
+        return jsonify(
+            {
+                "model_family": self.__class__.__name__,
+                "vla": policy_caps.get(
+                    "vla", getattr(self, "policy", None) is not None
+                ),
+                "vlm": policy_caps.get("vlm", False),
+                "modalities": modalities,
+                "action_spec": {
+                    "action_dim": getattr(self, "action_dim", None),
+                    "chunk_size": getattr(self, "action_horizon", None),
+                    "action_mode": policy_caps.get("action_mode", "unknown"),
                 },
-                "state": {
-                    "used": state_caps.get("used", False),
-                    "required": state_caps.get("required", False),
-                    "dim": state_caps.get("dim", None),
+                "max_batch_size": policy_caps.get("max_batch_size", 1),
+                "sampling_defaults": {
+                    "num_steps": getattr(self, "num_inference_steps", 10),
+                    "cfg_scale": getattr(self, "cfg_scale", 1.0),
                 },
-                "prompt": {"required": True},
-            },
-            "action_spec": {
-                "action_dim": getattr(self, "action_dim", None),
-                "chunk_size": getattr(self, "action_horizon", None),
-                "action_mode": policy_caps.get("action_mode", "unknown"),
-            },
-            "max_batch_size": policy_caps.get("max_batch_size", 1),
-            "sampling_defaults": {
-                "num_steps": getattr(self, "num_inference_steps", 10),
-                "cfg_scale": getattr(self, "cfg_scale", 1.0),
-            },
-        })
+            }
+        )
 
     def _v1_infer(self):
         if getattr(self, "policy", None) is None:
@@ -878,14 +990,16 @@ class InferenceConfig(Config):
         if self._state_required() and "state" not in obs_raw:
             return jsonify({"error": "observation must contain state"}), 400
         if not any(k.startswith("image/") for k in obs):
-            return jsonify({"error": "observation must contain at least one image"}), 400
+            return (
+                jsonify({"error": "observation must contain at least one image"}),
+                400,
+            )
         sampling_raw = body.get("sampling") or {}
         if sampling_raw and not isinstance(sampling_raw, dict):
             return jsonify({"error": "sampling must be a JSON object"}), 400
         supported_sampling_keys = {f.name for f in fields(SamplingConfig)}
         sampling = {
-            k: v for k, v in sampling_raw.items()
-            if k in supported_sampling_keys
+            k: v for k, v in sampling_raw.items() if k in supported_sampling_keys
         }
         sc = SamplingConfig(**sampling) if sampling_raw else None
         if sc is not None:
@@ -895,10 +1009,12 @@ class InferenceConfig(Config):
         t0 = time.monotonic()
         out = self.policy.select_action(obs, sc)[0]
         latency_ms = round((time.monotonic() - t0) * 1000, 1)
-        return jsonify({
-            "actions": out.actions.tolist(),
-            "metadata": {"latency_ms": latency_ms},
-        })
+        return jsonify(
+            {
+                "actions": out.actions.tolist(),
+                "metadata": {"latency_ms": latency_ms},
+            }
+        )
 
     def _v1_reset(self):
         if getattr(self, "policy", None) is not None:
@@ -917,21 +1033,25 @@ class InferenceConfig(Config):
             do_sample=body.get("temperature", 1.0) != 0,
         )
         out = self.policy.generate(obs, sc)
-        return jsonify({
-            "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
-            "object": "chat.completion",
-            "model": body.get("model", "unknown"),
-            "choices": [{
-                "index": 0,
-                "message": {"role": "assistant", "content": out.text},
-                "finish_reason": out.finish_reason,
-            }],
-            "usage": {
-                "prompt_tokens": 0,
-                "completion_tokens": len(out.tokens),
-                "total_tokens": len(out.tokens),
-            },
-        })
+        return jsonify(
+            {
+                "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
+                "object": "chat.completion",
+                "model": body.get("model", "unknown"),
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": out.text},
+                        "finish_reason": out.finish_reason,
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "completion_tokens": len(out.tokens),
+                    "total_tokens": len(out.tokens),
+                },
+            }
+        )
 
     def _decode_observation(self, obs_raw: dict) -> dict:
         """Convert v1/infer HTTP payload → policy observation dict (single sample, non-list values).
@@ -948,13 +1068,18 @@ class InferenceConfig(Config):
 
         if "images" in obs_raw and isinstance(obs_raw["images"], dict):
             # new format: numeric string keys "1", "2", ...
-            for slot_str, b64 in sorted(obs_raw["images"].items(), key=lambda x: self._parse_image_slot(x[0])):
+            for slot_str, b64 in sorted(
+                obs_raw["images"].items(), key=lambda x: self._parse_image_slot(x[0])
+            ):
                 external_slot = self._parse_image_slot(slot_str)
                 internal_slot = external_slot - 1
-                obs[f"image/{internal_slot}"] = self._decode_b64_image(b64, f"images.{slot_str}")
+                obs[f"image/{internal_slot}"] = self._decode_b64_image(
+                    b64, f"images.{slot_str}"
+                )
         else:
             # legacy compat: image_1, image_2, ... → image/0, image/1, ...
             import re
+
             old_keys = sorted(
                 (k for k in obs_raw if re.fullmatch(r"image_\d+", k)),
                 key=lambda k: int(k.split("_")[1]),
@@ -962,7 +1087,21 @@ class InferenceConfig(Config):
             for key in old_keys:
                 external_slot = self._parse_image_slot(key.split("_")[1])
                 internal_slot = external_slot - 1
-                obs[f"image/{internal_slot}"] = self._decode_b64_image(obs_raw[key], key)
+                obs[f"image/{internal_slot}"] = self._decode_b64_image(
+                    obs_raw[key], key
+                )
+
+        history_images = obs_raw.get("history_images")
+        if history_images is not None:
+            if not isinstance(history_images, list):
+                raise ValueError(
+                    "observation.history_images must be a JSON array of "
+                    "base64 images"
+                )
+            obs["history_images"] = [
+                self._decode_b64_image(value, f"history_images[{index}]")
+                for index, value in enumerate(history_images)
+            ]
 
         state = obs_raw.get("state")
         if state is not None:
@@ -974,16 +1113,16 @@ class InferenceConfig(Config):
         if getattr(self, "policy", None) is None:
             return False
         return bool(
-            self.policy.get_capabilities()
-            .get("state", {})
-            .get("required", False)
+            self.policy.get_capabilities().get("state", {}).get("required", False)
         )
 
     def _parse_image_slot(self, slot) -> int:
         try:
             slot = int(slot)
         except (TypeError, ValueError) as exc:
-            raise ValueError(f"image slot must be a numeric string, got {slot!r}") from exc
+            raise ValueError(
+                f"image slot must be a numeric string, got {slot!r}"
+            ) from exc
         if slot < 1:
             raise ValueError(f"image slot must be 1-based and positive, got {slot}")
         return slot
@@ -1014,7 +1153,9 @@ class InferenceConfig(Config):
                         url = part["image_url"]["url"]
                         if url.startswith("data:"):
                             b64 = url.split(",", 1)[1]
-                            img = Image.open(BytesIO(base64.b64decode(b64))).convert("RGB")
+                            img = Image.open(BytesIO(base64.b64decode(b64))).convert(
+                                "RGB"
+                            )
                             images.append(img)
         return {"prompt": text, "images": images}
 
@@ -1033,8 +1174,8 @@ class BaseExp(Config):
     trainer_config: TrainerConfig = field(default_factory=TrainerConfig)
     data_config: DataConfig = field(default_factory=DataConfig)
     tokenizer_config: TokenizerConfig = field(default_factory=TokenizerConfig)
-    
-    logger_level: str = field(default='INFO')
+
+    logger_level: str = field(default="INFO")
     backend_resolution: Optional[BackendResolution] = field(
         default=None, init=False, repr=False
     )
@@ -1057,7 +1198,9 @@ class BaseExp(Config):
             fsdp_version,
             resolution.plugin_kwargs,
             package_versions.torch if package_versions else torch.__version__,
-            package_versions.transformers if package_versions else transformers.__version__,
+            package_versions.transformers
+            if package_versions
+            else transformers.__version__,
             package_versions.accelerate if package_versions else "unknown",
         )
 
@@ -1175,12 +1318,11 @@ class BaseExp(Config):
         fsdp_plugin = getattr(self.trainer.accelerator.state, "fsdp_plugin", None)
         logger.info("fsdp_plugin = {}", fsdp_plugin)
         if fsdp_plugin is not None:
-            logger.info(
-                "fsdp_version = {}", getattr(fsdp_plugin, "fsdp_version", None)
-            )
+            logger.info("fsdp_version = {}", getattr(fsdp_plugin, "fsdp_version", None))
 
         try:
             from torch.distributed._tensor import DTensor
+
             has_dtensor = any(
                 isinstance(param, DTensor) for param in self.trainer.model.parameters()
             )
@@ -1277,7 +1419,8 @@ class BaseExp(Config):
             "use_fast": self.tokenizer_config.use_fast_tokenizer,
         }
         tokenizer = self.tokenizer_config.build_tokenizer(
-            self.model_config.model_name_or_path, **tokenizer_kwargs)
+            self.model_config.model_name_or_path, **tokenizer_kwargs
+        )
         self.tokenizer = tokenizer
 
         # Step 2: build model
@@ -1287,7 +1430,8 @@ class BaseExp(Config):
             self.data_config.action_config.string_format,
             self.data_config.action_config.vocab_size,
             self.tokenizer,
-            self.model)
+            self.model,
+        )
         self._set_training_use_cache(False)
 
         # Step 3: build dataloader
@@ -1314,39 +1458,48 @@ class BaseExp(Config):
             train_dataset.action_process_func, "statistic_mapping"
         ):
             logger.info(
-                f"Saving action norm config to {self.trainer_config.output_dir}/norm_stats.json")
+                f"Saving action norm config to {self.trainer_config.output_dir}/norm_stats.json"
+            )
             os.makedirs(self.trainer_config.output_dir, exist_ok=True)
             action_norm_config = train_dataset.action_process_func.statistic_mapping
-            with open(os.path.join(self.trainer_config.output_dir, "norm_stats.json"), "w") as f:
+            with open(
+                os.path.join(self.trainer_config.output_dir, "norm_stats.json"), "w"
+            ) as f:
                 json.dump(action_norm_config, f, indent=2, cls=NumpyEncoder)
 
         self._apply_fsdp_model_dtype()
 
     def _auto_compute_norm_stats(self) -> None:
-        if not self.data_config.auto_norm or self.data_config.action_config.statistic_mapping is not None:
+        if (
+            not self.data_config.auto_norm
+            or self.data_config.action_config.statistic_mapping is not None
+        ):
             return
         norm_config = ComputeNormActionConfig(
             delta=self.data_config.action_config.delta,
-            norm_method=self.data_config.auto_norm_method)
+            norm_method=self.data_config.auto_norm_method,
+        )
         save_name = hashlib.md5(self.data_config.dataset_name.encode()).hexdigest()[:8]
         norm_config.norm_save_path = os.path.join(
-            os.path.dirname(norm_config.norm_save_path), save_name)
-        norm_file_path = os.path.join(norm_config.norm_save_path, 'norm_stats.json')
+            os.path.dirname(norm_config.norm_save_path), save_name
+        )
+        norm_file_path = os.path.join(norm_config.norm_save_path, "norm_stats.json")
         if self.local_rank == 0 and not megfile.smart_exists(norm_file_path):
-            logger.info('Auto-computing norm stats on rank0')
+            logger.info("Auto-computing norm stats on rank0")
             norm_config.compute_norm_stats(self.data_config.dataset_name)
         else:
             while not megfile.smart_exists(norm_file_path):
                 time.sleep(5)
                 print(
-                    f'Waiting for norm stats: {norm_file_path} to be computed on rank{self.local_rank}')
+                    f"Waiting for norm stats: {norm_file_path} to be computed on rank{self.local_rank}"
+                )
         self.data_config.action_config.statistic_mapping = norm_file_path
 
     def __post_init__(self):
         if self.trainer_config.debug_mode:
             enter_debug_mode(enable=True)
             self.trainer_config.dataloader_num_workers = 1
-            self.logger_level = 'DEBUG'
+            self.logger_level = "DEBUG"
         logger.remove()
         logger.add(sys.stdout, level=self.logger_level)
 
@@ -1365,10 +1518,11 @@ class BaseExp(Config):
             self.trainer.save_state()
             self._set_training_use_cache(True)
             safe_save_model_for_hf_trainer(
-                trainer=self.trainer,
-                output_dir=self.trainer_config.output_dir)
+                trainer=self.trainer, output_dir=self.trainer_config.output_dir
+            )
             logger.info(
-                f"Training completed and model saved to {self.trainer_config.output_dir}")
+                f"Training completed and model saved to {self.trainer_config.output_dir}"
+            )
         finally:
             if torch.distributed.is_available() and torch.distributed.is_initialized():
                 try:

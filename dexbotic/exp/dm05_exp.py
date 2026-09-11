@@ -378,8 +378,21 @@ class DM05InferenceConfig(BaseInferenceConfig):
     chunk_size: int = field(default=10)
     diffusion_steps: int = field(default=10)
     model_max_length: int = field(default=768)
+    history_enabled: bool = field(default=False)
+    max_history_images: int = field(default=5)
     llm_attn_implementation: str = field(default="eager")
     camera_order: list = field(default_factory=lambda: ["agentview", "wrist"])
+    backend: Literal["default", "fast"] = field(default="default")
+    vision_trt_engine_path: str = field(
+        default="checkpoints/trt_engines/dm05_vision.engine"
+    )
+    build_vision_engine_if_missing: bool = field(default=True)
+    force_rebuild_vision_engine: bool = field(default=False)
+    prefix_seq_len_buckets: list[int] = field(
+        default_factory=lambda: [576, 704, 768, 896, 1024]
+    )
+    fast_overflow_policy: Literal["error", "fallback"] = field(default="fallback")
+    fast_prefix_qkv_mode: Literal["packed", "separate"] = field(default="packed")
 
     @property
     def action_horizon(self) -> int:
@@ -395,12 +408,13 @@ class DM05InferenceConfig(BaseInferenceConfig):
             trust_remote_code=True,
         )
         model = unwrap_dm05_model(model)
-        model.set_attention_implementation(
-            llm_attn_implementation=self.llm_attn_implementation,
-            vision_attn_implementation="sdpa",
-            action_attn_implementation="sdpa",
-            bf16=torch.cuda.is_available(),
-        )
+        if self.backend == "default":
+            model.set_attention_implementation(
+                llm_attn_implementation=self.llm_attn_implementation,
+                vision_attn_implementation="sdpa",
+                action_attn_implementation="sdpa",
+                bf16=torch.cuda.is_available(),
+            )
         model.to(self.device)
         model.eval()
         self.model = model
@@ -433,14 +447,55 @@ class DM05InferenceConfig(BaseInferenceConfig):
         )
 
     def _initialize_inference(self) -> None:
+        if self.backend not in {"default", "fast"}:
+            raise ValueError(f"Unsupported DM05 backend: {self.backend!r}")
+        if self.backend == "fast":
+            try:
+                __import__("dexbotic_dm05_fast")
+            except ImportError as exc:
+                raise ImportError(
+                    "DM05 fast inference requires the dexbotic-dm05-fast plugin. "
+                    "Run 'bash plugins/dm05-fast/install.sh' in the active "
+                    "Dexbotic environment."
+                ) from exc
         if self.norm_stats is None:
             self.norm_stats = self.read_normalization_stats(
                 os.path.join(self.model_name_or_path, "norm_stats.json")
             )
         self._load_model()
         self.policy = self._build_policy()
+        if self.backend == "default":
+            return
+
+        from dexbotic.model.dm05.infer.backend import (
+            DM05FastBackendConfig,
+            build_dm05_runtime,
+        )
+
+        fast_config = DM05FastBackendConfig(
+            vision_engine_path=self.vision_trt_engine_path,
+            build_engine_if_missing=self.build_vision_engine_if_missing,
+            force_rebuild_engine=self.force_rebuild_vision_engine,
+            prefix_buckets=tuple(self.prefix_seq_len_buckets),
+            overflow_policy=self.fast_overflow_policy,
+            prefix_qkv_mode=self.fast_prefix_qkv_mode,
+        )
+        self.inference_runtime = build_dm05_runtime(
+            policy=self.policy,
+            checkpoint=self.model_name_or_path,
+            num_images=self.num_images,
+            diffusion_steps=self.diffusion_steps,
+            fast_config=fast_config,
+            history_enabled=self.history_enabled,
+        )
+        self.policy.inference_runtime = self.inference_runtime
 
     def _build_policy(self):
+        max_history_images = self.max_history_images
+        if self.backend == "fast":
+            from dexbotic.model.dm05.infer.fast.vision_trt import MAX_HISTORY_IMAGES
+
+            max_history_images = min(max_history_images, MAX_HISTORY_IMAGES)
         return DM05Policy(
             model=self.model,
             processor=self.processor,
@@ -455,6 +510,8 @@ class DM05InferenceConfig(BaseInferenceConfig):
             diffusion_steps=self.diffusion_steps,
             model_max_length=self.model_max_length,
             camera_order=self.camera_order,
+            history_enabled=self.history_enabled,
+            max_history_images=max_history_images,
         )
 
     def read_normalization_stats(self, action_norm_file: str | None) -> dict:
@@ -467,6 +524,7 @@ class DM05InferenceConfig(BaseInferenceConfig):
         results = self._get_response(
             text=request.form.get("text", ""),
             images=request.files.getlist("image"),
+            history_images=request.files.getlist("history_images"),
             states=request.form.get("states", None),
         )
         action = np.asarray(results, dtype=np.float64)
@@ -481,14 +539,22 @@ class DM05InferenceConfig(BaseInferenceConfig):
         self,
         text: str,
         images: list,
+        history_images: list | None = None,
         states: Optional[str] = None,
     ) -> list[list[float]]:
         pil_images = [Image.open(img).convert("RGB") for img in images]
+        pil_history_images = [
+            Image.open(img).convert("RGB") for img in (history_images or [])
+        ]
         if states is None:
             state = [0.0] * self.model_action_dim
         else:
             state = json.loads(states)
-        obs = {"prompt": text, "state": state}
+        obs = {
+            "prompt": text,
+            "state": state,
+            "history_images": pil_history_images,
+        }
         for i, pil in enumerate(pil_images):
             obs[f"image/{i}"] = pil
         action = self.policy.select_action(obs)[0].actions

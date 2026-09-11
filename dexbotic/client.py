@@ -64,17 +64,29 @@ class DexClient:
     # ── legacy path ───────────────────────────────────────────────────────────
 
     def _infer_legacy(self, observation, prompt) -> list:
-        images = [observation["image"]] if not isinstance(observation["image"], list) else observation["image"]
+        images = (
+            [observation["image"]]
+            if not isinstance(observation["image"], list)
+            else observation["image"]
+        )
         encoded = []
         for img in images:
             img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
             _, buf = cv2.imencode(".png", img_bgr)
             encoded.append(buf.tobytes())
 
+        history_images = observation.get("history_images") or []
+        encoded_history = []
+        for img in history_images:
+            img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+            _, buf = cv2.imencode(".png", img_bgr)
+            encoded_history.append(buf.tobytes())
+
         ret = requests.post(
             self.base_url + "/process_frame",
             data={"text": prompt, **self._legacy_sampling_payload()},
-            files=[("image", b) for b in encoded],
+            files=[("image", b) for b in encoded]
+            + [("history_images", b) for b in encoded_history],
         )
         ret.raise_for_status()
         return ret.json()["response"]
@@ -85,11 +97,27 @@ class DexClient:
         obs_payload = {"prompt": prompt, "images": {}}
 
         # observation["image"] may be a single frame or a list of frames
-        images = observation["image"] if isinstance(observation["image"], list) else [observation["image"]]
+        images = (
+            observation["image"]
+            if isinstance(observation["image"], list)
+            else [observation["image"]]
+        )
         for idx, img in enumerate(images):
             img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
             _, buf = cv2.imencode(".png", img_bgr)
-            obs_payload["images"][str(idx + 1)] = base64.b64encode(buf.tobytes()).decode()
+            obs_payload["images"][str(idx + 1)] = base64.b64encode(
+                buf.tobytes()
+            ).decode()
+
+        history_images = observation.get("history_images") or []
+        if history_images:
+            obs_payload["history_images"] = []
+            for img in history_images:
+                img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                _, buf = cv2.imencode(".png", img_bgr)
+                obs_payload["history_images"].append(
+                    base64.b64encode(buf.tobytes()).decode()
+                )
 
         state = observation.get("state")
         if state is not None:
@@ -109,8 +137,12 @@ class DexClient:
         action = np.copy(last_action)
         action[6:] = 0
         action = action + delta_action
-        action[3:6] = np.where(action[3:6] > math.pi, action[3:6] - 2 * math.pi, action[3:6])
-        action[3:6] = np.where(action[3:6] < -math.pi, action[3:6] + 2 * math.pi, action[3:6])
+        action[3:6] = np.where(
+            action[3:6] > math.pi, action[3:6] - 2 * math.pi, action[3:6]
+        )
+        action[3:6] = np.where(
+            action[3:6] < -math.pi, action[3:6] + 2 * math.pi, action[3:6]
+        )
         return action
 
     def _legacy_sampling_payload(self) -> dict:

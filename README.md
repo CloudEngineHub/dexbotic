@@ -29,6 +29,8 @@
 
 ## 🔥 News
 
+- **[2026-09-09]** Added explicit [DM05 history-frame inference](docs/DM05.md#history-frame-inference) to the default and fast backends, the v1 API, the legacy API, and `DexClient`.
+- **[2026-09-07]** Added the [optimized DM05 inference backend](docs/DM05.md#inference-backends) with TensorRT vision execution, Triton kernels, prefix buckets, and lazy CUDA Graph capture.
 - **[2026-09-01]** Dexbotic [DM05](docs/DM05.md) released! See the [technical report](https://www.dexmal.com/blog/dm0.5) for more information. See [libero_dm05.py](playground/benchmarks/libero/libero_dm05.py) and [libero_dm05_lora.py](playground/benchmarks/libero/libero_dm05_lora.py) for LIBERO full SFT and LoRA.
 - **[2026-08-06]** Added [CogACT LIBERO LoRA SFT](docs/LiberoLora.md#cogact-lora-recipe) support; see the [CogACT LoRA](playground/benchmarks/libero/libero_cogact_lora.py) for details.
 - **[2026-08-06]** Added [DM0 LIBERO LoRA SFT](docs/LiberoLora.md#dm0-lora-recipe) support; see the [DM0 LoRA](playground/benchmarks/libero/libero_dm0_lora.py) for details.

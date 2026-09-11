@@ -11,10 +11,16 @@ from transformers import AutoProcessor
 
 from dexbotic.data.dataset.transform.action import ActionNorm
 from dexbotic.data.dataset.transform.common import ToTensor
+from dexbotic.history import (
+    HistoryImageSpec,
+    collate_history_image_tensors,
+    validate_history_images,
+)
+from dexbotic.model.dm05.dm05_utils import HISTORY_IMAGE_TOKEN, HISTORY_TOKENS_PER_IMAGE
 
 
 class DM05ActionNorm(ActionNorm):
-    """Quantile norm with clip + zero constant dims (OpenDM parity)."""
+    """Quantile normalization with clipping and zeroed constant dimensions."""
 
     def _normalize(self, data, stats):
         lo = np.asarray(stats["min"], dtype=np.float32)
@@ -83,6 +89,8 @@ class DM05DataCollator:
         valid_action_dim: int = 7,
         model_action_dim: int = 32,
         chunk_size: int = 10,
+        history_enabled: bool = False,
+        max_history_images: int = 5,
     ):
         self.processor = processor
         self.tokenizer = (
@@ -93,12 +101,39 @@ class DM05DataCollator:
         self.model_action_dim = model_action_dim
         self.chunk_size = chunk_size
         self.pad_token_id = self.tokenizer.pad_token_id
+        self.history_spec = HistoryImageSpec(
+            enabled=bool(history_enabled),
+            max_images=int(max_history_images),
+        )
+        self.history_enabled = self.history_spec.enabled
+        self.history_token_id = self.tokenizer.convert_tokens_to_ids(
+            HISTORY_IMAGE_TOKEN
+        )
 
     def _tokenize_instance(
-        self, prompt: str, pil_views: list[Image.Image]
+        self,
+        prompt: str,
+        pil_views: list[Image.Image],
+        pil_history_views: list[Image.Image] | None = None,
     ) -> dict[str, torch.Tensor]:
         text = f"Robot: Franka\nOverall speed: 0.5\nTask: {prompt}.\n"
         user_content = [{"type": "text", "text": text}]
+        history_pixel_values = None
+        pil_history_views = validate_history_images(
+            pil_history_views or [],
+            self.history_spec,
+            value_name="pil_history_views",
+        )
+        if self.history_enabled:
+            user_content[-1]["text"] += "History images: "
+            user_content[-1]["text"] += (
+                HISTORY_IMAGE_TOKEN * HISTORY_TOKENS_PER_IMAGE + "\n"
+            ) * len(pil_history_views)
+            if pil_history_views:
+                history_pixel_values = self.processor.image_processor(
+                    images=[image.convert("RGB") for image in pil_history_views],
+                    return_tensors="pt",
+                )["pixel_values"]
         for label, image in zip(self.image_prompts, pil_views, strict=True):
             if user_content[-1]["type"] == "text":
                 user_content[-1]["text"] += f"{label} image: "
@@ -113,31 +148,45 @@ class DM05DataCollator:
             return_dict=True,
             return_tensors="pt",
         )
-        if inputs["input_ids"].shape[1] <= self.max_length:
-            return inputs
-        prompt_token_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
-        overflow = inputs["input_ids"].shape[1] - self.max_length
-        keep_tokens = max(0, len(prompt_token_ids) - overflow - 16)
-        if keep_tokens < len(prompt_token_ids):
-            shortened = self.tokenizer.decode(
-                prompt_token_ids[:keep_tokens], skip_special_tokens=False
-            ).strip()
-            user_content[0]["text"] = user_content[0]["text"].replace(
-                prompt, shortened, 1
-            )
-            inputs = self.processor.apply_chat_template(
-                messages,
-                tokenize=True,
-                add_generation_prompt=True,
-                return_dict=True,
-                return_tensors="pt",
-            )
+        if inputs["input_ids"].shape[1] > self.max_length:
+            prompt_token_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
+            overflow = inputs["input_ids"].shape[1] - self.max_length
+            keep_tokens = max(0, len(prompt_token_ids) - overflow - 16)
+            if keep_tokens < len(prompt_token_ids):
+                shortened = self.tokenizer.decode(
+                    prompt_token_ids[:keep_tokens], skip_special_tokens=False
+                ).strip()
+                user_content[0]["text"] = user_content[0]["text"].replace(
+                    prompt, shortened, 1
+                )
+                inputs = self.processor.apply_chat_template(
+                    messages,
+                    tokenize=True,
+                    add_generation_prompt=True,
+                    return_dict=True,
+                    return_tensors="pt",
+                )
         if inputs["input_ids"].shape[1] > self.max_length:
             raise ValueError(
                 f"DM05 sequence length {inputs['input_ids'].shape[1]} exceeds "
                 f"max_length={self.max_length}; truncating would split image "
                 "tokens from pixel_values."
             )
+        if history_pixel_values is not None:
+            history_mask = inputs["input_ids"] == self.history_token_id
+            expected_tokens = (
+                int(history_pixel_values.shape[0]) * HISTORY_TOKENS_PER_IMAGE
+            )
+            actual_tokens = int(history_mask.sum().item())
+            if actual_tokens != expected_tokens:
+                raise ValueError(
+                    "DM05 history placeholder count does not match history "
+                    f"images: expected {expected_tokens}, got {actual_tokens}."
+                )
+            inputs["token_type_ids"] = inputs["token_type_ids"].clone()
+            inputs["token_type_ids"][history_mask] = 1
+            inputs["history_pixel_values"] = history_pixel_values
+            inputs["history_mask"] = history_mask
         return inputs
 
     def __call__(self, instances: Sequence[dict]) -> dict[str, torch.Tensor]:
@@ -153,11 +202,25 @@ class DM05DataCollator:
                 Image.fromarray(view.permute(1, 2, 0).to(torch.uint8).cpu().numpy())
                 for view in image
             ]
-            tokenized.append(self._tokenize_instance(prompt, pil_views))
+            history_images = inst.get("history_images")
+            pil_history_views = []
+            if history_images is not None:
+                if history_images.ndim == 3:
+                    history_images = history_images[None]
+                pil_history_views = [
+                    Image.fromarray(view.permute(1, 2, 0).to(torch.uint8).cpu().numpy())
+                    for view in history_images
+                ]
+            tokenized.append(
+                self._tokenize_instance(prompt, pil_views, pil_history_views)
+            )
             actions.append(inst["action"].float())
 
         max_len = max(item["input_ids"].shape[1] for item in tokenized)
         input_ids, attention_mask, token_type_ids, pixel_values = [], [], [], []
+        has_history = any("history_mask" in item for item in tokenized)
+        history_masks = []
+        per_sample_history_pixel_values = []
         for item in tokenized:
             pad_len = max_len - item["input_ids"].shape[1]
             input_ids.append(
@@ -192,13 +255,28 @@ class DM05DataCollator:
                 )
             )
             pixel_values.append(item["pixel_values"])
+            per_sample_history_pixel_values.append(item.get("history_pixel_values"))
+            if has_history:
+                item_history_mask = item.get(
+                    "history_mask",
+                    torch.zeros_like(item["input_ids"], dtype=torch.bool),
+                )
+                history_masks.append(
+                    torch.cat(
+                        [
+                            item_history_mask,
+                            torch.zeros((1, pad_len), dtype=torch.bool),
+                        ],
+                        dim=1,
+                    )
+                )
 
         action = torch.stack(actions, dim=0)
         action_mask = torch.zeros(
             len(instances), self.chunk_size, self.model_action_dim, dtype=action.dtype
         )
         action_mask[..., : self.valid_action_dim] = 1.0
-        return {
+        batch = {
             "input_ids": torch.cat(input_ids, dim=0),
             "attention_mask": torch.cat(attention_mask, dim=0),
             "token_type_ids": torch.cat(token_type_ids, dim=0),
@@ -206,3 +284,13 @@ class DM05DataCollator:
             "action": action,
             "action_mask": action_mask,
         }
+        if has_history:
+            history_batch = collate_history_image_tensors(
+                per_sample_history_pixel_values,
+                max_images=self.history_spec.max_images,
+            )
+            if history_batch.pixel_values is None:
+                raise RuntimeError("history masks exist without history pixel values")
+            batch["history_mask"] = torch.cat(history_masks, dim=0)
+            batch["history_pixel_values"] = history_batch.pixel_values
+        return batch

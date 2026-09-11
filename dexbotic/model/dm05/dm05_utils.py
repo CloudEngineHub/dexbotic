@@ -5,6 +5,7 @@ from functools import partial
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 from transformers.cache_utils import Cache, CacheLayerMixin
 from transformers.modeling_layers import GradientCheckpointingLayer
 
@@ -21,6 +22,23 @@ except ImportError:
 
 
 from transformers.models.gemma3.modeling_gemma3 import Gemma3DecoderLayer
+
+
+def linear_fp32(x: torch.Tensor, linear: torch.nn.Module) -> torch.Tensor:
+    """Run a projection in FP32 without changing the stored parameter dtype."""
+
+    with torch.autocast(device_type=x.device.type, enabled=False):
+        x = x.float()
+        if linear.__class__.__name__ == "ModulesToSaveWrapper":
+            linear = (
+                linear.original_module
+                if linear.disable_adapters
+                else linear.modules_to_save[linear.active_adapters[0]]
+            )
+        if type(linear) is torch.nn.Linear:
+            bias = None if linear.bias is None else linear.bias.float()
+            return F.linear(x, linear.weight.float(), bias)
+        return linear(x)
 
 
 def is_flash_attention_2_available() -> bool:
@@ -187,6 +205,31 @@ def posemb_sincos(
     return torch.cat([torch.sin(sin_input), torch.cos(sin_input)], dim=1)
 
 
+# DM05 represents each history image with a pooled 4x4 grid of Gemma 3 vision
+# features. ``<unused0>`` reserves those positions in the language prefix and
+# ``<unused1>`` marks history slots that must remain invisible to attention.
+HISTORY_IMAGE_TOKEN = "<unused0>"
+HISTORY_PAD_TOKEN = "<unused1>"
+HISTORY_TOKENS_PER_IMAGE = 16
+HISTORY_POOL_SIZE = 4
+HISTORY_PAD_TOKEN_ID = 7
+
+assert HISTORY_POOL_SIZE * HISTORY_POOL_SIZE == HISTORY_TOKENS_PER_IMAGE
+
+
+def mask_history_pad_tokens_in_attention(
+    input_ids: torch.LongTensor | None,
+    attention_mask: torch.Tensor | None,
+) -> torch.Tensor | None:
+    if input_ids is None:
+        return attention_mask
+    if attention_mask is None:
+        attention_mask = torch.ones_like(input_ids, dtype=torch.long)
+    else:
+        attention_mask = attention_mask.clone()
+    return attention_mask.masked_fill(input_ids == HISTORY_PAD_TOKEN_ID, 0)
+
+
 def make_suffix_attn_mask(
     input_ids: torch.Tensor,
     prefix_len: int,
@@ -195,6 +238,7 @@ def make_suffix_attn_mask(
     device: torch.device,
     dtype: torch.dtype = torch.bfloat16,
     pad_token_id: int = 0,
+    invisible_prefix_token_ids: tuple[int, ...] = (),
 ) -> torch.Tensor:
     """Build the attention mask from suffix tokens to prefix and suffix tokens.
 
@@ -213,6 +257,8 @@ def make_suffix_attn_mask(
     )
     prefix_ids = input_ids[:, :prefix_len]
     pad_mask = prefix_ids == pad_token_id
+    for token_id in invisible_prefix_token_ids:
+        pad_mask = pad_mask | (prefix_ids == token_id)
     pad_mask = pad_mask.unsqueeze(1).expand(-1, suffix_len, -1)
     prefix_mask = prefix_mask.masked_fill(pad_mask, NEG_INF)
 

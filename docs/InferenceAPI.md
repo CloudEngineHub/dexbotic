@@ -44,6 +44,16 @@ libero DM0 probe benchmark. See [DM0 realtime inference](DM0RealtimeInference.md
 for launch instructions, benchmark numbers, timing scope, and backend-specific
 constraints.
 
+## DM05 optimized and history inference
+
+DM05 provides `default` and `fast` inference backends behind the same legacy
+and v1 HTTP APIs. It also accepts an explicit history-frame sequence when
+`history_enabled=True`. The fast backend uses TensorRT vision execution and
+DM05-specific Triton kernels; requests without history use lazy CUDA Graph
+profiles, while requests containing history use the optimized uncaptured path.
+See [DM05 inference backends](DM05.md#inference-backends) for installation,
+configuration, TensorRT engine shapes, and constraints.
+
 ## Routes
 
 ### `GET /health`
@@ -69,28 +79,33 @@ environment or client.
 curl http://localhost:7891/v1/capabilities
 ```
 
-Example response:
+Example response from a history-enabled DM05 server:
 
 ```json
 {
-  "model_family": "DM0InferenceConfig",
+  "model_family": "DM05InferenceConfig",
   "vla": true,
   "vlm": false,
   "modalities": {
     "images": {
       "format": "image/{slot_index}",
       "slots": [
-        {"slot": 1, "name": "front", "required": true},
-        {"slot": 2, "name": "left_wrist", "required": true},
-        {"slot": 3, "name": "right_wrist", "required": false}
+        {"slot": 1, "name": "agentview", "required": true},
+        {"slot": 2, "name": "wrist", "required": true}
       ]
+    },
+    "history_images": {
+      "supported": true,
+      "max_images": 5,
+      "ordering": "oldest_to_newest",
+      "management": "explicit"
     },
     "state": {"used": false, "required": false, "dim": null},
     "prompt": {"required": true}
   },
   "action_spec": {
     "action_dim": 7,
-    "chunk_size": null,
+    "chunk_size": 10,
     "action_mode": "absolute"
   },
   "max_batch_size": 1,
@@ -103,6 +118,9 @@ Important fields:
 - `modalities.images.slots`: image slots expected by the policy. Slot names
   come from `camera_order`; `null` slots are zero-padded by the model wrapper.
 - `modalities.state`: whether proprio/state is used or required.
+- `modalities.history_images`: whether explicit history frames are supported,
+  their maximum count and ordering. `management: "explicit"` means the caller
+  supplies the complete history sequence on every request.
 - `action_spec.action_mode`: whether returned actions are already absolute or
   should be interpreted as relative/delta actions by the caller.
 - `vla` and `vlm`: whether the server supports action inference and text
@@ -123,6 +141,10 @@ Request schema:
       "2": "<left wrist camera base64 encoded image>",
       "3": "<right wrist camera base64 encoded image>"
     },
+    "history_images": [
+      "<oldest history frame as a base64 encoded image>",
+      "<newest history frame as a base64 encoded image>"
+    ],
     "state": [0.0, 0.0, 0.0]
   },
   "sampling": {
@@ -150,6 +172,10 @@ Notes:
 
 - `images` keys must be 1-based numeric strings: `"1"`, `"2"`, ...
 - Images are base64-encoded PNG/JPEG bytes.
+- `history_images` is optional. When supplied, it must be an array of
+  base64-encoded images ordered from oldest to newest. Check
+  `/v1/capabilities` for `supported` and `max_images` before sending it. The
+  server does not accumulate, sample, or reorder history frames.
 - `state` is optional unless `/v1/capabilities` says it is required. When
   required, the HTTP layer only checks that the `state` key is present; concrete
   policies decide how to consume or validate its value.
@@ -211,7 +237,8 @@ the visual scene should include at least one image.
 
 ## Python client
 
-Use `DexClient` for both legacy and v1 inference.
+Use `DexClient` for both legacy and v1 inference. This example targets a
+history-enabled DM05 server with `agentview` and `wrist` camera inputs.
 
 ```python
 import cv2
@@ -226,9 +253,12 @@ client = DexClient(
 
 obs = {
     "image": [
-        cv2.cvtColor(cv2.imread("front.png"), cv2.COLOR_BGR2RGB),
-        cv2.cvtColor(cv2.imread("left_wrist.png"), cv2.COLOR_BGR2RGB),
-        cv2.cvtColor(cv2.imread("right_wrist.png"), cv2.COLOR_BGR2RGB),
+        cv2.cvtColor(cv2.imread("agentview.png"), cv2.COLOR_BGR2RGB),
+        cv2.cvtColor(cv2.imread("wrist.png"), cv2.COLOR_BGR2RGB),
+    ],
+    "history_images": [
+        cv2.cvtColor(cv2.imread("history-oldest.png"), cv2.COLOR_BGR2RGB),
+        cv2.cvtColor(cv2.imread("history-newest.png"), cv2.COLOR_BGR2RGB),
     ],
     "state": [0.0] * 7,
 }
@@ -242,6 +272,10 @@ For legacy clients:
 ```python
 client = DexClient(base_url="http://localhost:7891", api_style="legacy")
 ```
+
+`DexClient` reads `observation["history_images"]` for both API styles. The v1
+client sends a JSON array; the legacy client sends one multipart
+`history_images` field per frame.
 
 `use_delta` is a client-side post-processing option. If it is true, the client
 accumulates returned actions as deltas against the previous action. Choose this
@@ -268,6 +302,8 @@ payload = {
             "2": image_2,
             "3": image_3,
         },
+        # Optional, ordered from oldest to newest:
+        # "history_images": [history_1, history_2],
         "state": [0.0] * 7,
     }
 }
@@ -352,6 +388,7 @@ model architecture.
 | Model family | Default v1 action mode | State |
 | --- | --- | --- |
 | Pi0 / Pi05-style policy | absolute | optional, used when provided |
+| DM05 | absolute | not required by the current policy |
 | DM0 | absolute | not required by current policy |
 | OFT / OFT-discrete | relative | not required by current policy |
 | CogACT | relative | not required |

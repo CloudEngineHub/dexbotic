@@ -31,10 +31,14 @@ from transformers.models.gemma3.modeling_gemma3 import (
 )
 
 from dexbotic.model.dm05.dm05_utils import (
+    HISTORY_PAD_TOKEN_ID,
+    HISTORY_POOL_SIZE,
     VLADynamicCache,
     is_flash_attention_2_available,
     is_flex_attention_available,
+    linear_fp32,
     make_suffix_attn_mask,
+    mask_history_pad_tokens_in_attention,
     patch_decoder_layers,
     posemb_sincos,
     validate_action_config_compatible,
@@ -844,14 +848,73 @@ class DM05ForConditionalGeneration(DM05PreTrainedModel):
         diffusion_steps: int = 10,
         past_key_values: Cache | None = None,
         action_mask: torch.BoolTensor | None = None,
+        history_pixel_values: torch.Tensor | None = None,
+        history_mask: torch.BoolTensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
-        kv_cache = VLADynamicCache(config=self.model.language_model.config)
-        prefix_position_ids = (attention_mask.cumsum(dim=-1) - 1).clamp_min_(0)
+        if (history_pixel_values is None) != (history_mask is None):
+            raise ValueError(
+                "history_pixel_values and history_mask must be provided together"
+            )
 
-        self.model.vlm.model(
+        kv_cache = VLADynamicCache(config=self.model.language_model.config)
+        vlm_model = self.model.vlm.model
+        prefix_inputs_embeds = None
+        prefix_attention_mask = mask_history_pad_tokens_in_attention(
             input_ids=input_ids,
             attention_mask=attention_mask,
+        )
+        assert prefix_attention_mask is not None
+
+        if history_pixel_values is not None:
+            assert history_mask is not None
+            history_mask = history_mask.to(
+                device=input_ids.device,
+                dtype=torch.bool,
+            )
+            inputs_embeds = vlm_model.get_input_embeddings()(input_ids)
+            pixels = history_pixel_values.to(
+                device=inputs_embeds.device,
+                dtype=next(vlm_model.vision_tower.parameters()).dtype,
+            )
+            history_features = vlm_model.get_image_features(
+                pixels, return_dict=True
+            ).pooler_output
+            spatial = int(history_features.shape[1] ** 0.5)
+            if spatial * spatial != int(history_features.shape[1]):
+                raise ValueError(
+                    "DM05 history vision token count must be a square, got "
+                    f"{int(history_features.shape[1])}"
+                )
+            hidden_size = int(history_features.shape[-1])
+            history_features = history_features.view(
+                -1, spatial, spatial, hidden_size
+            ).permute(0, 3, 1, 2)
+            history_features = F.adaptive_avg_pool2d(
+                history_features,
+                output_size=(HISTORY_POOL_SIZE, HISTORY_POOL_SIZE),
+            )
+            history_features = history_features.permute(0, 2, 3, 1).reshape(
+                -1, HISTORY_POOL_SIZE * HISTORY_POOL_SIZE, hidden_size
+            )
+            expected_values = int(history_mask.sum().item()) * hidden_size
+            if int(history_features.numel()) != expected_values:
+                raise ValueError(
+                    "DM05 history features do not match placeholder tokens: "
+                    f"features={int(history_features.numel())}, "
+                    f"expected={expected_values}"
+                )
+            history_mask_expanded = history_mask.unsqueeze(-1).expand_as(inputs_embeds)
+            prefix_inputs_embeds = inputs_embeds.masked_scatter(
+                history_mask_expanded,
+                history_features.to(dtype=inputs_embeds.dtype),
+            )
+
+        prefix_position_ids = (prefix_attention_mask.cumsum(dim=-1) - 1).clamp_min_(0)
+        vlm_model(
+            input_ids=None if prefix_inputs_embeds is not None else input_ids,
+            inputs_embeds=prefix_inputs_embeds,
+            attention_mask=prefix_attention_mask,
             position_ids=prefix_position_ids,
             past_key_values=kv_cache,
             pixel_values=pixel_values,
@@ -879,7 +942,7 @@ class DM05ForConditionalGeneration(DM05PreTrainedModel):
             )
             if action_mask is not None:
                 x_t = x_t * action_mask.to(dtype=x_t.dtype)
-            suffix_embeds = self.model.action_in_proj(x_t)
+            suffix_embeds = linear_fp32(x_t, self.model.action_in_proj).to(dtype)
             adarms_cond = self._build_adarms_cond(time_tensor, suffix_embeds.dtype)
             suffix_len = int(suffix_embeds.shape[1])
             suffix_attn_mask = make_suffix_attn_mask(
@@ -890,6 +953,7 @@ class DM05ForConditionalGeneration(DM05PreTrainedModel):
                 device=suffix_embeds.device,
                 dtype=suffix_embeds.dtype,
                 pad_token_id=self.model.vlm.model.language_model.padding_idx,
+                invisible_prefix_token_ids=(HISTORY_PAD_TOKEN_ID,),
             )
             suffix_position_ids = self._build_suffix_position_ids(
                 prefix_len,
@@ -907,7 +971,7 @@ class DM05ForConditionalGeneration(DM05PreTrainedModel):
                 adarms_cond=adarms_cond,
             )
 
-            v_t = self.model.action_out_proj(suffix_out)
+            v_t = linear_fp32(suffix_out, self.model.action_out_proj)
             x_t = x_t + v_t * dt
             time_val += dt
         return x_t
