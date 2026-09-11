@@ -29,6 +29,8 @@
 
 ## 🔥 最新动态
 
+- **[2026-09-09]** 为默认后端与 fast 后端、v1 API、旧版 API 以及 `DexClient` 增加了显式的 [DM05 history-frame 推理](docs/DM05.md#history-frame-inference)支持。
+- **[2026-09-07]** 新增[优化的 DM05 推理后端](docs/DM05.md#inference-backends)，支持 TensorRT 视觉执行、Triton kernels、prefix buckets 和延迟 CUDA Graph 捕获。
 - **[2026-09-01]** [DM05](docs/DM05.md) 正式发布！详情参见 [技术报告](https://www.dexmal.com/blog/dm0.5)。LIBERO full SFT 与 LoRA 见 [libero_dm05.py](playground/benchmarks/libero/libero_dm05.py) 和 [libero_dm05_lora.py](playground/benchmarks/libero/libero_dm05_lora.py)。
 - **[2026-08-06]** 新增 [CogACT LIBERO LoRA SFT](docs/LiberoLora.md#cogact-lora-recipe) 支持，详见 [CogACT LoRA](playground/benchmarks/libero/libero_cogact_lora.py)。
 - **[2026-08-06]** 新增 [DM0 LIBERO LoRA SFT](docs/LiberoLora.md#dm0-lora-recipe) 支持，详见 [DM0 LoRA](playground/benchmarks/libero/libero_dm0_lora.py)。
