@@ -33,7 +33,7 @@ class DM05Policy(BasePolicy):
         model_action_dim: int = 32,
         chunk_size: int = 10,
         diffusion_steps: int = 10,
-        model_max_length: int = 768,
+        model_max_length: int | None = None,
         camera_order: list | None = None,
         history_enabled: bool = False,
         max_history_images: int = 5,

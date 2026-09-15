@@ -8,7 +8,7 @@ from dexbotic.exp.dm05_exp import DM05ModelConfig as _DM05ModelConfig
 from dexbotic.exp.dm05_exp import DM05TrainerConfig as _DM05TrainerConfig
 
 
-def parse_args():
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--task",
@@ -30,7 +30,71 @@ def parse_args():
         type=str,
         default=None,
     )
-    args, _ = parser.parse_known_args()
+    parser.add_argument(
+        "--backend",
+        "--inference-backend",
+        dest="backend",
+        choices=["default", "fast"],
+        default=None,
+        help="DM05 inference backend. Defaults to 'default'.",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Inference service port. Defaults to 7891.",
+    )
+    parser.add_argument(
+        "--vision-trt-engine-path",
+        "--vision_trt_engine_path",
+        dest="vision_trt_engine_path",
+        default=None,
+        help="TensorRT vision engine path used by the fast backend.",
+    )
+    parser.add_argument(
+        "--build-vision-engine-if-missing",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Build a matching TensorRT vision engine during fast startup.",
+    )
+    parser.add_argument(
+        "--force-rebuild-vision-engine",
+        action="store_true",
+        default=None,
+        help="Rebuild the TensorRT vision engine even when one already exists.",
+    )
+    parser.add_argument(
+        "--prefix-seq-len-buckets",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Fixed prefix-length buckets available to the fast backend.",
+    )
+    parser.add_argument(
+        "--fast-overflow-policy",
+        choices=["error", "fallback"],
+        default=None,
+        help="Behavior when a request exceeds every fast prefix bucket.",
+    )
+    parser.add_argument(
+        "--fast-prefix-qkv-mode",
+        choices=["packed", "separate"],
+        default=None,
+        help="Prefix QKV projection mode used by the fast backend.",
+    )
+    parser.add_argument(
+        "--history-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Accept explicit history images during inference.",
+    )
+    parser.add_argument(
+        "--max-history-images",
+        type=int,
+        default=None,
+        help="Maximum number of explicit history images accepted per request.",
+    )
+    args, _ = parser.parse_known_args(argv)
     return args
 
 
@@ -60,13 +124,32 @@ class DM05Exp(_DM05Exp):
     trainer_config: DM05TrainerConfig = field(default_factory=DM05TrainerConfig)
 
 
+def configure_inference(exp: DM05Exp, args: argparse.Namespace) -> None:
+    config = exp.inference_config
+    for name in (
+        "model_name_or_path",
+        "backend",
+        "port",
+        "vision_trt_engine_path",
+        "build_vision_engine_if_missing",
+        "force_rebuild_vision_engine",
+        "prefix_seq_len_buckets",
+        "fast_overflow_policy",
+        "fast_prefix_qkv_mode",
+        "history_enabled",
+        "max_history_images",
+    ):
+        value = getattr(args, name, None)
+        if value is not None:
+            setattr(config, name, value)
+
+
 if __name__ == "__main__":
     args = parse_args()
     exp = DM05Exp()
     if args.train_backend is not None:
         exp.trainer_config.train_backend = args.train_backend
-    if args.model_name_or_path is not None:
-        exp.inference_config.model_name_or_path = args.model_name_or_path
+    configure_inference(exp, args)
     if args.task == "train":
         exp.train()
     elif args.task == "inference":

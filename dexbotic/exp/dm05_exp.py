@@ -377,7 +377,7 @@ class DM05InferenceConfig(BaseInferenceConfig):
     model_action_dim: int = field(default=32)
     chunk_size: int = field(default=10)
     diffusion_steps: int = field(default=10)
-    model_max_length: int = field(default=768)
+    model_max_length: int | None = field(default=None)
     history_enabled: bool = field(default=False)
     max_history_images: int = field(default=5)
     llm_attn_implementation: str = field(default="eager")
@@ -490,12 +490,14 @@ class DM05InferenceConfig(BaseInferenceConfig):
         )
         self.policy.inference_runtime = self.inference_runtime
 
-    def _build_policy(self):
-        max_history_images = self.max_history_images
+    def _effective_max_history_images(self) -> int:
         if self.backend == "fast":
             from dexbotic.model.dm05.infer.fast.vision_trt import MAX_HISTORY_IMAGES
 
-            max_history_images = min(max_history_images, MAX_HISTORY_IMAGES)
+            return min(self.max_history_images, MAX_HISTORY_IMAGES)
+        return self.max_history_images
+
+    def _build_policy(self):
         return DM05Policy(
             model=self.model,
             processor=self.processor,
@@ -511,7 +513,7 @@ class DM05InferenceConfig(BaseInferenceConfig):
             model_max_length=self.model_max_length,
             camera_order=self.camera_order,
             history_enabled=self.history_enabled,
-            max_history_images=max_history_images,
+            max_history_images=self._effective_max_history_images(),
         )
 
     def read_normalization_stats(self, action_norm_file: str | None) -> dict:

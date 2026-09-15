@@ -16,7 +16,11 @@ from dexbotic.history import (
     collate_history_image_tensors,
     validate_history_images,
 )
-from dexbotic.model.dm05.dm05_utils import HISTORY_IMAGE_TOKEN, HISTORY_TOKENS_PER_IMAGE
+from dexbotic.model.dm05.dm05_utils import (
+    HISTORY_IMAGE_TOKEN,
+    HISTORY_PAD_TOKEN,
+    HISTORY_TOKENS_PER_IMAGE,
+)
 
 
 class DM05ActionNorm(ActionNorm):
@@ -85,7 +89,7 @@ class DM05DataCollator:
     def __init__(
         self,
         processor: AutoProcessor,
-        max_length: int = 768,
+        max_length: int | None = None,
         valid_action_dim: int = 7,
         model_action_dim: int = 32,
         chunk_size: int = 10,
@@ -125,10 +129,13 @@ class DM05DataCollator:
             value_name="pil_history_views",
         )
         if self.history_enabled:
+            n_valid = len(pil_history_views)
             user_content[-1]["text"] += "History images: "
             user_content[-1]["text"] += (
-                HISTORY_IMAGE_TOKEN * HISTORY_TOKENS_PER_IMAGE + "\n"
-            ) * len(pil_history_views)
+                HISTORY_PAD_TOKEN
+                * (HISTORY_TOKENS_PER_IMAGE * (self.history_spec.max_images - n_valid))
+                + ((HISTORY_IMAGE_TOKEN * HISTORY_TOKENS_PER_IMAGE) + "\n") * n_valid
+            )
             if pil_history_views:
                 history_pixel_values = self.processor.image_processor(
                     images=[image.convert("RGB") for image in pil_history_views],
@@ -148,7 +155,10 @@ class DM05DataCollator:
             return_dict=True,
             return_tensors="pt",
         )
-        if inputs["input_ids"].shape[1] > self.max_length:
+        if (
+            self.max_length is not None
+            and inputs["input_ids"].shape[1] > self.max_length
+        ):
             prompt_token_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
             overflow = inputs["input_ids"].shape[1] - self.max_length
             keep_tokens = max(0, len(prompt_token_ids) - overflow - 16)
@@ -166,7 +176,10 @@ class DM05DataCollator:
                     return_dict=True,
                     return_tensors="pt",
                 )
-        if inputs["input_ids"].shape[1] > self.max_length:
+        if (
+            self.max_length is not None
+            and inputs["input_ids"].shape[1] > self.max_length
+        ):
             raise ValueError(
                 f"DM05 sequence length {inputs['input_ids'].shape[1]} exceeds "
                 f"max_length={self.max_length}; truncating would split image "
