@@ -961,6 +961,7 @@ class DM05ForConditionalGeneration(DM05PreTrainedModel):
                 device,
                 input_ids=input_ids,
                 pad_token_id=self.model.vlm.model.language_model.padding_idx,
+                invisible_prefix_token_ids=(HISTORY_PAD_TOKEN_ID,),
             )
 
             suffix_out = self._suffix_forward(
@@ -1008,8 +1009,11 @@ class DM05ForConditionalGeneration(DM05PreTrainedModel):
         device,
         input_ids: torch.Tensor,
         pad_token_id=0,
+        invisible_prefix_token_ids: tuple[int, ...] = (),
     ):
         valid_prefix = input_ids[:, :prefix_len] != pad_token_id  # [B, prefix_len]
+        for token_id in invisible_prefix_token_ids:
+            valid_prefix = valid_prefix & (input_ids[:, :prefix_len] != token_id)
         effective_prefix_len = valid_prefix.sum(dim=1)  # [B]
 
         # suffix position ids = [effective_prefix_len, effective_prefix_len+1, ...]
