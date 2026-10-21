@@ -112,6 +112,7 @@ class DM05VisionTensorRTRunner:
                 f"got {self.runner.input_names}, {self.runner.output_names}."
             )
         self.device = self.runner.device
+        self.engine_identity = self.runner.engine_identity
         self.input_name = self.runner.input_names[0]
         self.output_name = self.runner.output_names[0]
         self.input_dtype = self.runner.input_dtypes[self.input_name]

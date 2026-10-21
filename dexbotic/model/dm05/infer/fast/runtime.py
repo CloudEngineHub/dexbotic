@@ -118,6 +118,7 @@ class DM05FastRuntime:
         prefix_qkv_mode: str = "packed",
         history_enabled: bool = False,
         vision_runner=None,
+        prefix_mlp_backend=None,
     ) -> None:
         ensure_cuda_graph_available()
         self.model = DM05FastForCausalLM(
@@ -133,6 +134,16 @@ class DM05FastRuntime:
         self.suffix_len = self.model.suffix_len
         self.action_dim = self.model.action_dim
         self.noise_dtype = self.model.noise_dtype
+        self.prefix_mlp_backend = prefix_mlp_backend
+        if prefix_mlp_backend is not None and (
+            history_enabled or self.noise_dtype != torch.bfloat16
+        ):
+            raise ValueError(
+                "FP8 prefix MLP requires BF16 fast inference without history."
+            )
+        self._fp8_completion = (
+            torch.cuda.Event() if prefix_mlp_backend is not None else None
+        )
         self.history_enabled = bool(history_enabled)
         self.diffusion_steps = int(diffusion_steps)
         if self.diffusion_steps <= 0:
@@ -370,6 +381,11 @@ class DM05FastRuntime:
             prefix_buffers=prefix_buffers,
             history_mask=history_mask,
             history_features=history_features,
+            prefix_mlp_forward=(
+                self.prefix_mlp_backend.forward_into
+                if self.prefix_mlp_backend is not None
+                else None
+            ),
         )
         prefix_visible_mask = self.model.build_prefix_visible_mask(
             input_ids=input_ids,
@@ -576,17 +592,30 @@ class DM05FastRuntime:
         """Run one request and return a request-owned CPU action tensor."""
 
         with self._lock:
-            output = self._infer_locked(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                pixel_values=pixel_values,
-                token_type_ids=token_type_ids,
-                action_mask=action_mask,
-                diffusion_input_noise=diffusion_input_noise,
-                history_pixel_values=history_pixel_values,
-                history_mask=history_mask,
+            stream = (
+                torch.cuda.current_stream(self.device)
+                if self._fp8_completion is not None
+                else None
             )
-            return self._materialize_output(output)
+            if stream is not None:
+                stream.wait_event(self._fp8_completion)
+            try:
+                output = self._infer_locked(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    pixel_values=pixel_values,
+                    token_type_ids=token_type_ids,
+                    action_mask=action_mask,
+                    diffusion_input_noise=diffusion_input_noise,
+                    history_pixel_values=history_pixel_values,
+                    history_mask=history_mask,
+                )
+                return self._materialize_output(output)
+            finally:
+                # Also order outstanding work after an exception; a host lock
+                # alone cannot protect the shared TRT scratch across streams.
+                if stream is not None:
+                    self._fp8_completion.record(stream)
 
     @staticmethod
     def _materialize_output(output: torch.Tensor) -> torch.Tensor:

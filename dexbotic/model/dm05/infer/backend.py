@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from loguru import logger
+
 from dexbotic.infer.runtime import InferenceRuntime
 
 
@@ -41,7 +43,7 @@ def _model_inputs(tensors: dict) -> dict:
         "token_type_ids": tensors["token_type_ids"],
         "action_mask": tensors["action_mask"],
     }
-    for name in ("history_pixel_values", "history_mask"):
+    for name in ("history_pixel_values", "history_mask", "diffusion_input_noise"):
         if name in tensors:
             inputs[name] = tensors[name]
     return inputs
@@ -70,30 +72,81 @@ class DM05FastBackend:
             ensure_dm05_vision_engine,
         )
 
-        engine_path = Path(config.vision_engine_path).expanduser()
+        device = next(model.parameters()).device
         vision_image_slots = int(num_images) + (
             MAX_HISTORY_IMAGES if history_enabled else 0
         )
-        if config.force_rebuild_engine or config.build_engine_if_missing:
-            ensure_dm05_vision_engine(
-                checkpoint=checkpoint,
-                engine_path=engine_path,
-                num_images=vision_image_slots,
-                force_rebuild=config.force_rebuild_engine,
+        self.prefix_mlp_backend = None
+        engine_path = Path(config.vision_engine_path).expanduser()
+        vision_runner = None
+
+        def load_vision(path):
+            runner = DM05VisionTensorRTRunner(path, device=device)
+            if runner.num_images != vision_image_slots:
+                raise ValueError(
+                    "DM05 vision engine image count does not match configured "
+                    "current/history slots: "
+                    f"engine={runner.num_images}, configured={vision_image_slots}, "
+                    f"path={path}."
+                )
+            return runner
+
+        if not history_enabled and not config.force_rebuild_engine:
+            from dexbotic.model.dm05.infer.fast.build_prefix_mlp_trt import (
+                find_prepared_fp8_engines,
             )
+            from dexbotic.model.dm05.infer.fast.prefix_mlp_trt import (
+                PrefixMLPFP8Backend,
+            )
+
+            minimum = num_images * (
+                int(model.model.vlm.model.config.mm_tokens_per_image) + 1
+            )
+            buckets = tuple(b for b in config.prefix_buckets if b >= minimum)
+            if not buckets:
+                raise ValueError(
+                    "No DM05 prefix bucket can fit the configured image tokens: "
+                    f"minimum={minimum}, buckets={config.prefix_buckets}."
+                )
+
+            prepared_engines = find_prepared_fp8_engines(checkpoint)
+            if prepared_engines is not None:
+                try:
+                    prepared_vision = load_vision(prepared_engines[0])
+                    prepared_prefix = PrefixMLPFP8Backend(
+                        model.model.vlm,
+                        prepared_engines[1],
+                        buckets,
+                        device=device,
+                        vision_engine_identity=prepared_vision.engine_identity,
+                    )
+                except (OSError, ValueError, RuntimeError, KeyError, TypeError) as exc:
+                    logger.warning(
+                        "Prepared FP8 engines cannot be used; using BF16 fast "
+                        "inference: {}",
+                        exc,
+                    )
+                else:
+                    engine_path = prepared_engines[0]
+                    vision_runner = prepared_vision
+                    self.prefix_mlp_backend = prepared_prefix
+                    logger.info(
+                        "Enabled native FP8 prefix MLP with vision engine {}",
+                        engine_path,
+                    )
+
+        if vision_runner is None:
+            if config.force_rebuild_engine or config.build_engine_if_missing:
+                ensure_dm05_vision_engine(
+                    checkpoint=checkpoint,
+                    engine_path=engine_path,
+                    num_images=vision_image_slots,
+                    force_rebuild=config.force_rebuild_engine,
+                )
+            vision_runner = load_vision(engine_path)
+
         from dexbotic.model.dm05.infer.fast.runtime import DM05FastRuntime
 
-        vision_runner = DM05VisionTensorRTRunner(
-            engine_path, device=next(model.parameters()).device
-        )
-        if vision_runner.num_images != vision_image_slots:
-            raise ValueError(
-                "DM05 vision engine image count does not match configured "
-                "current/history slots: "
-                f"engine={vision_runner.num_images}, "
-                f"configured={vision_image_slots}, "
-                f"path={engine_path}."
-            )
         self.runtime = DM05FastRuntime(
             model,
             engine_path,
@@ -103,6 +156,7 @@ class DM05FastBackend:
             prefix_qkv_mode=config.prefix_qkv_mode,
             history_enabled=history_enabled,
             vision_runner=vision_runner,
+            prefix_mlp_backend=self.prefix_mlp_backend,
         )
 
     def execute(self, tensors: dict):

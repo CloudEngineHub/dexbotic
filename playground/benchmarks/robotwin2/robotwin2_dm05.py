@@ -256,18 +256,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--vision-trt-engine-path",
         default="checkpoints/trt_engines/robotwin2_dm05_vision.engine",
-        help="TensorRT vision engine path used by the fast backend.",
+        help="TensorRT vision engine path used when fast history is enabled.",
     )
     parser.add_argument(
-        "--build-vision-engine-if-missing",
+        "--build-engine-if-missing",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Build a matching three-image TensorRT engine during fast startup.",
+        help=(
+            "Build the configured vision engine at startup when BF16 fast "
+            "inference needs it; FP8 bundles are prepared separately."
+        ),
     )
     parser.add_argument(
-        "--force-rebuild-vision-engine",
+        "--force-rebuild-engine",
         action="store_true",
-        help="Rebuild the TensorRT vision engine even when one already exists.",
+        help=(
+            "Skip prepared FP8 selection, rebuild the configured vision engine, "
+            "and use BF16 prefix MLPs."
+        ),
     )
     parser.add_argument(
         "--prefix-seq-len-buckets",
@@ -307,8 +313,8 @@ def configure_inference(exp: DM05Exp, args: argparse.Namespace) -> None:
     config.backend = args.backend
     config.port = args.port
     config.vision_trt_engine_path = args.vision_trt_engine_path
-    config.build_vision_engine_if_missing = args.build_vision_engine_if_missing
-    config.force_rebuild_vision_engine = args.force_rebuild_vision_engine
+    config.build_engine_if_missing = args.build_engine_if_missing
+    config.force_rebuild_engine = args.force_rebuild_engine
     config.fast_overflow_policy = args.fast_overflow_policy
     config.fast_prefix_qkv_mode = args.fast_prefix_qkv_mode
     config.history_enabled = args.history_enabled

@@ -386,8 +386,8 @@ class DM05InferenceConfig(BaseInferenceConfig):
     vision_trt_engine_path: str = field(
         default="checkpoints/trt_engines/dm05_vision.engine"
     )
-    build_vision_engine_if_missing: bool = field(default=True)
-    force_rebuild_vision_engine: bool = field(default=False)
+    build_engine_if_missing: bool = field(default=True)
+    force_rebuild_engine: bool = field(default=False)
     prefix_seq_len_buckets: list[int] = field(
         default_factory=lambda: [576, 704, 768, 896, 1024]
     )
@@ -474,8 +474,8 @@ class DM05InferenceConfig(BaseInferenceConfig):
 
         fast_config = DM05FastBackendConfig(
             vision_engine_path=self.vision_trt_engine_path,
-            build_engine_if_missing=self.build_vision_engine_if_missing,
-            force_rebuild_engine=self.force_rebuild_vision_engine,
+            build_engine_if_missing=self.build_engine_if_missing,
+            force_rebuild_engine=self.force_rebuild_engine,
             prefix_buckets=tuple(self.prefix_seq_len_buckets),
             overflow_policy=self.fast_overflow_policy,
             prefix_qkv_mode=self.fast_prefix_qkv_mode,

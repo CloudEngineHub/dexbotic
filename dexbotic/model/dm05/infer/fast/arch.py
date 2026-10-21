@@ -7,6 +7,7 @@ and dispatches the fused Triton kernel path on CUDA.
 
 import copy
 import inspect
+from collections.abc import Callable
 from typing import Any
 
 import torch
@@ -900,6 +901,9 @@ class DM05FastForCausalLM:
         history_pixel_values: torch.Tensor | None = None,
         history_mask: torch.BoolTensor | None = None,
         history_features: torch.Tensor | None = None,
+        prefix_mlp_forward: (
+            Callable[[int, torch.Tensor, torch.Tensor], None] | None
+        ) = None,
     ) -> tuple[Cache, int]:
         """Fill the prefix KV cache with the static decoder fastpath."""
         if not self.prefix_decoder_initialized:
@@ -1056,7 +1060,10 @@ class DM05FastForCausalLM:
                 pre_eps=float(decoder_layer.pre_feedforward_layernorm.eps),
             )
             mlp_input = prefix_buffers.mlp_input
-            prefix_buffers.mlp_out.copy_(decoder_layer.mlp(mlp_input))
+            if prefix_mlp_forward is None:
+                prefix_buffers.mlp_out.copy_(decoder_layer.mlp(mlp_input))
+            else:
+                prefix_mlp_forward(layer_idx, mlp_input, prefix_buffers.mlp_out)
             hidden_states = triton_kernels.launch_prefix_post_ffn_norm_residual(
                 prefix_buffers,
                 decoder_layer.post_feedforward_layernorm.weight,

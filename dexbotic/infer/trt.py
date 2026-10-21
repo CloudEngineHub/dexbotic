@@ -2,22 +2,33 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
+if TYPE_CHECKING:
+    import numpy as np
+
 __all__ = [
     "EngineManifest",
+    "FP8_E4M3_MAX",
     "TensorManifest",
     "TensorRTRunner",
+    "add_static_fp8_linear_weight_qdq",
+    "add_static_fp8_qdq",
     "build_fp16_engine_from_onnx",
     "engine_shape",
+    "fp8_scale_from_amax",
     "load_tensorrt",
     "resolve_io_names",
 ]
+
+FP8_E4M3_MAX = 448.0
 
 
 @dataclass(frozen=True)
@@ -69,6 +80,86 @@ def load_tensorrt(context: str):
     return trt
 
 
+def fp8_scale_from_amax(amax: float) -> np.ndarray:
+    """Return a scalar E4M3 scale suitable for a strongly typed FP16 Q/DQ."""
+    import numpy as np
+
+    fp16_max = float(np.finfo(np.float16).max)
+    if not math.isfinite(amax) or not 0 <= amax <= fp16_max:
+        raise ValueError(
+            "FP8 Q/DQ requires finite ranges representable by its FP16 tensors."
+        )
+    return np.asarray([max(float(amax) / FP8_E4M3_MAX, 1e-8)], dtype=np.float32)
+
+
+def add_static_fp8_qdq(
+    *,
+    trt,
+    network,
+    tensor,
+    scale: np.ndarray,
+    name: str,
+    keepalive: list[np.ndarray],
+):
+    """Add FP8 quantize/dequantize layers driven by one constant scale."""
+    keepalive.append(scale)
+    scale_layer = network.add_constant(tuple(scale.shape), scale)
+    if scale_layer is None:
+        raise RuntimeError(f"Failed to add FP8 scale for {name}.")
+    scale_layer.name = f"{name}.scale"
+    quantize = network.add_quantize(
+        tensor,
+        scale_layer.get_output(0),
+        trt.fp8,
+    )
+    if quantize is None:
+        raise RuntimeError(f"Failed to add FP8 quantize layer for {name}.")
+    quantize.name = f"{name}.quantize"
+    dequantize = network.add_dequantize(
+        quantize.get_output(0),
+        scale_layer.get_output(0),
+        trt.float16,
+    )
+    if dequantize is None:
+        raise RuntimeError(f"Failed to add FP8 dequantize layer for {name}.")
+    dequantize.name = f"{name}.dequantize"
+    return dequantize.get_output(0)
+
+
+def add_static_fp8_linear_weight_qdq(
+    *,
+    trt,
+    network,
+    weight: torch.Tensor,
+    name: str,
+    keepalive: list[np.ndarray],
+):
+    """Add one transposed FP16 Linear weight with a static per-tensor Q/DQ."""
+    import numpy as np
+
+    weight_kn = (
+        weight.detach()
+        .to(dtype=torch.float16, device="cpu")
+        .transpose(0, 1)
+        .contiguous()
+        .numpy()
+    )
+    batched_weight = weight_kn[None, ...]
+    keepalive.append(batched_weight)
+    constant = network.add_constant(tuple(batched_weight.shape), batched_weight)
+    if constant is None:
+        raise RuntimeError(f"Failed to add TensorRT weight for {name}.")
+    constant.name = f"{name}.weight"
+    return add_static_fp8_qdq(
+        trt=trt,
+        network=network,
+        tensor=constant.get_output(0),
+        scale=fp8_scale_from_amax(float(np.abs(weight_kn).max())),
+        name=f"{name}.weight",
+        keepalive=keepalive,
+    )
+
+
 def resolve_cuda_device(device: torch.device | str, context: str) -> torch.device:
     requested = torch.device(device)
     if requested.type != "cuda" or not torch.cuda.is_available():
@@ -78,13 +169,20 @@ def resolve_cuda_device(device: torch.device | str, context: str) -> torch.devic
     return requested
 
 
-def deserialize_engine(trt: Any, engine_path: str | Path, context: str):
+def deserialize_engine(
+    trt: Any, engine_path: str | Path, context: str, *, artifact_record=None
+):
     engine_path = Path(engine_path)
     logger = trt.Logger(trt.Logger.WARNING)
+    payload = engine_path.read_bytes()
     with trt.Runtime(logger) as runtime:
-        engine = runtime.deserialize_cuda_engine(engine_path.read_bytes())
+        engine = runtime.deserialize_cuda_engine(payload)
     if engine is None:
         raise RuntimeError(f"Failed to deserialize {context} engine: {engine_path}")
+    if artifact_record is not None:
+        artifact_record.update(
+            bytes=len(payload), sha256=hashlib.sha256(payload).hexdigest()
+        )
     return logger, engine
 
 
@@ -254,12 +352,11 @@ class TensorRTRunner:
             raise FileNotFoundError(f"{context} engine not found: {self.engine_path}")
         self.device = resolve_cuda_device(device, context)
         self.trt = load_tensorrt(context)
+        self.engine_identity = {}
         self.logger, self.engine = deserialize_engine(
-            self.trt, self.engine_path, context
+            self.trt, self.engine_path, context, artifact_record=self.engine_identity
         )
-        self.context = self.engine.create_execution_context()
-        if self.context is None:
-            raise RuntimeError(f"Failed to create {context} execution context.")
+        self.context = create_execution_context(self.engine, context)
         self.input_names, self.output_names = resolve_io_names(self.engine, self.trt)
         self.input_dtypes = {
             name: tensor_dtype(self.engine, self.trt, name) for name in self.input_names
@@ -301,3 +398,89 @@ class TensorRTRunner:
             outputs=outputs,
         ):
             raise RuntimeError(f"TensorRT execution failed: {self.engine_path}")
+
+
+def create_execution_context(
+    engine: Any,
+    context: str,
+    *,
+    use_external_device_memory: bool = False,
+) -> Any:
+    if use_external_device_memory:
+        execution_context = engine.create_execution_context_without_device_memory()
+    else:
+        execution_context = engine.create_execution_context()
+    if execution_context is None:
+        raise RuntimeError(f"Failed to create {context} TensorRT context.")
+    return execution_context
+
+
+def device_memory_size(engine: Any) -> int:
+    return int(
+        engine.get_device_memory_size_v2()
+        if hasattr(engine, "get_device_memory_size_v2")
+        else engine.device_memory_size
+    )
+
+
+def set_context_device_memory(context: Any, device_memory: torch.Tensor) -> None:
+    if hasattr(context, "set_device_memory"):
+        try:
+            context.set_device_memory(int(device_memory.data_ptr()))
+        except TypeError:
+            context.device_memory = int(device_memory.data_ptr())
+    else:
+        context.device_memory = int(device_memory.data_ptr())
+
+
+def assign_device_memory(
+    *,
+    context: Any,
+    device_memory: torch.Tensor,
+    device: torch.device,
+    required_size: int,
+    label: str,
+) -> torch.Tensor:
+    if not device_memory.is_cuda:
+        raise RuntimeError(f"{label} device memory must be CUDA.")
+    if device_memory.device != device:
+        device_memory = device_memory.to(device)
+    if not device_memory.is_contiguous():
+        device_memory = device_memory.contiguous()
+    device_memory_bytes = int(device_memory.numel() * device_memory.element_size())
+    if device_memory_bytes < int(required_size):
+        raise RuntimeError(
+            f"Shared {label} device memory is too small: "
+            f"need {required_size} bytes, got {device_memory_bytes}."
+        )
+    set_context_device_memory(context, device_memory)
+    return device_memory
+
+
+def current_build_metadata(device=None) -> dict:
+    import torch
+
+    trt = load_tensorrt("TensorRT engine identity verification")
+    properties = torch.cuda.get_device_properties(device)
+    return {
+        "tensorrt": trt.__version__,
+        "cuda": torch.version.cuda,
+        "torch": torch.__version__,
+        "gpu_name": properties.name,
+        "compute_capability": [properties.major, properties.minor],
+        "gpu_multiprocessors": properties.multi_processor_count,
+    }
+
+
+def validate_build_metadata(recorded: dict, actual: dict) -> None:
+    for key in (
+        "tensorrt",
+        "cuda",
+        "gpu_name",
+        "compute_capability",
+        "gpu_multiprocessors",
+    ):
+        if key not in recorded or recorded[key] != actual.get(key):
+            raise ValueError(
+                f"TensorRT engine build/runtime {key} mismatch; rebuild for this environment."
+            )
