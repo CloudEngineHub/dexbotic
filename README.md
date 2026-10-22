@@ -104,6 +104,7 @@ pip install -e .
 
 ### 2. Usage Guide
 
+- [DM05 Inference: Default, Fast, and Optional FP8 Preparation](docs/DM05.md#inference-backends)
 - [Testing and Evaluation](docs/Tutorial.md#evaluation)
 - [Training with Provided Simulation Data](docs/Tutorial.md#training-a-model-with-provided-data)
 - [Training with Your Own Data](docs/Tutorial.md#training-a-model-with-your-own-data)

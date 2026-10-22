@@ -335,11 +335,14 @@ class DM05FastRuntime:
             "noise": noise,
             "action_mask": action_mask,
         }
-        profile.graph_runner = CudaGraphRunner.capture(
-            lambda **inputs: self._run_graph_profile(profile, inputs),
-            capture_inputs,
-            clone_outputs=False,
-        )
+        # Keep bucket-specific attention variants compiled during graph capture.
+        compile_limit = max(torch._dynamo.config.cache_size_limit, 64)
+        with torch._dynamo.config.patch(cache_size_limit=compile_limit):
+            profile.graph_runner = CudaGraphRunner.capture(
+                lambda **inputs: self._run_graph_profile(profile, inputs),
+                capture_inputs,
+                clone_outputs=False,
+            )
         self.profile_capture_count += 1
         logger.info(
             "Lazily captured DM05 prefix-prefill and denoising profile for "

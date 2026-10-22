@@ -102,6 +102,7 @@ pip install -e .
 
 ### 2. 使用指南
 
+- [DM05 推理：Default、Fast 与可选 FP8 准备](docs/DM05.md#inference-backends)
 - [测试与评估](docs/Tutorial.md#evaluation)
 - [基于仿真数据训练](docs/Tutorial.md#training-a-model-with-provided-data)
 - [使用自有数据训练](docs/Tutorial.md#training-a-model-with-your-own-data)
